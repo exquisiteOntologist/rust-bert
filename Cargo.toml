@@ -15,12 +15,13 @@ keywords = ["nlp", "deep-learning", "machine-learning", "transformers", "transla
 [lib]
 name = "rust_bert"
 path = "src/lib.rs"
-crate-type = ["lib"]
+crate-type = ["staticlib"]
+# crate-type = ["lib"] # <- Arch ARM64 issues with compiler
 
-[[bin]]
-name = "convert-tensor"
-path = "src/convert-tensor.rs"
-doc = false
+# [[bin]]
+# name = "convert-tensor"
+# path = "src/convert-tensor.rs"
+# doc = false
 
 [[bench]]
 name = "sst2_benchmark"
