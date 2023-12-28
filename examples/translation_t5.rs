@@ -12,7 +12,7 @@
 
 extern crate anyhow;
 
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::translation::{Language, TranslationConfig, TranslationModel};
 use rust_bert::resources::RemoteResource;
 use rust_bert::t5::{T5ConfigResources, T5ModelResources, T5VocabResources};
@@ -22,7 +22,6 @@ fn main() -> anyhow::Result<()> {
     let model_resource = RemoteResource::from_pretrained(T5ModelResources::T5_BASE);
     let config_resource = RemoteResource::from_pretrained(T5ConfigResources::T5_BASE);
     let vocab_resource = RemoteResource::from_pretrained(T5VocabResources::T5_BASE);
-    let merges_resource = RemoteResource::from_pretrained(T5VocabResources::T5_BASE);
 
     let source_languages = [
         Language::English,
@@ -39,10 +38,10 @@ fn main() -> anyhow::Result<()> {
 
     let translation_config = TranslationConfig::new(
         ModelType::T5,
-        model_resource,
+        ModelResource::Torch(Box::new(model_resource)),
         config_resource,
         vocab_resource,
-        merges_resource,
+        None,
         source_languages,
         target_languages,
         Device::cuda_if_available(),
@@ -57,7 +56,7 @@ fn main() -> anyhow::Result<()> {
     outputs.extend(model.translate(&[source_sentence], Language::English, Language::Romanian)?);
 
     for sentence in outputs {
-        println!("{}", sentence);
+        println!("{sentence}");
     }
     Ok(())
 }

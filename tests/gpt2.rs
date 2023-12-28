@@ -2,12 +2,12 @@ use rust_bert::gpt2::{
     GPT2Generator, GPT2LMHeadModel, Gpt2Config, Gpt2ConfigResources, Gpt2MergesResources,
     Gpt2ModelResources, Gpt2VocabResources,
 };
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::conversation::{
     ConversationConfig, ConversationManager, ConversationModel,
 };
 use rust_bert::pipelines::generation_utils::{
-    Cache, GenerateConfig, GenerateOptions, LMHeadModel, LanguageGenerator,
+    Cache, GenerateConfig, GenerateOptions, LanguageGenerator,
 };
 use rust_bert::pipelines::text_generation::{TextGenerationConfig, TextGenerationModel};
 use rust_bert::resources::{RemoteResource, ResourceProvider};
@@ -35,7 +35,7 @@ fn gpt2_lm_model() -> anyhow::Result<()> {
         false,
     )?;
     let config = Gpt2Config::from_file(config_path);
-    let gpt2_model = GPT2LMHeadModel::new(&vs.root(), &config);
+    let gpt2_model = GPT2LMHeadModel::new(vs.root(), &config);
     vs.load(weights_path)?;
 
     //    Define input
@@ -53,23 +53,13 @@ fn gpt2_lm_model() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
     //    Forward pass
     let model_output = gpt2_model
-        .forward_t(
-            Some(&input_tensor),
-            Cache::None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-        )
+        .forward_t(Some(&input_tensor), None, None, None, None, None, false)
         .unwrap();
 
     let next_word_id = model_output
@@ -117,11 +107,11 @@ fn gpt2_generation_greedy() -> anyhow::Result<()> {
 
     let generate_config = TextGenerationConfig {
         model_type: ModelType::GPT2,
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
-        max_length: 40,
+        merges_resource: Some(merges_resource),
+        max_length: Some(40),
         do_sample: false,
         num_beams: 1,
         temperature: 1.1,
@@ -131,7 +121,7 @@ fn gpt2_generation_greedy() -> anyhow::Result<()> {
     let model = TextGenerationModel::new(generate_config)?;
 
     let input_context = "The cat";
-    let output = model.generate(&[input_context], None);
+    let output = model.generate(&[input_context], None)?;
 
     assert_eq!(output.len(), 1);
     assert_eq!(output[0], "The cat was found in a field near the town of Keflavik, about 30 miles (48 kilometers) south-east of Moscow.\n\n\n");
@@ -149,11 +139,11 @@ fn gpt2_generation_beam_search() -> anyhow::Result<()> {
 
     let generate_config = TextGenerationConfig {
         model_type: ModelType::GPT2,
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
-        max_length: 20,
+        merges_resource: Some(merges_resource),
+        max_length: Some(20),
         do_sample: false,
         num_beams: 5,
         temperature: 1.2,
@@ -164,7 +154,7 @@ fn gpt2_generation_beam_search() -> anyhow::Result<()> {
     let model = TextGenerationModel::new(generate_config)?;
 
     let input_context = "The dog";
-    let output = model.generate(&[input_context], None);
+    let output = model.generate(&[input_context], None)?;
 
     assert_eq!(output.len(), 3);
     assert_eq!(
@@ -193,11 +183,11 @@ fn gpt2_generation_beam_search_multiple_prompts_without_padding() -> anyhow::Res
 
     let generate_config = TextGenerationConfig {
         model_type: ModelType::GPT2,
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
-        max_length: 20,
+        merges_resource: Some(merges_resource),
+        max_length: Some(20),
         do_sample: false,
         num_beams: 5,
         temperature: 1.2,
@@ -209,7 +199,7 @@ fn gpt2_generation_beam_search_multiple_prompts_without_padding() -> anyhow::Res
 
     let input_context_1 = "The dog";
     let input_context_2 = "The cat";
-    let output = model.generate(&[input_context_1, input_context_2], None);
+    let output = model.generate(&[input_context_1, input_context_2], None)?;
 
     assert_eq!(output.len(), 6);
     assert_eq!(
@@ -250,11 +240,11 @@ fn gpt2_generation_beam_search_multiple_prompts_with_padding() -> anyhow::Result
 
     let generate_config = TextGenerationConfig {
         model_type: ModelType::GPT2,
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
-        max_length: 20,
+        merges_resource: Some(merges_resource),
+        max_length: Some(20),
         do_sample: false,
         num_beams: 5,
         temperature: 1.2,
@@ -265,7 +255,7 @@ fn gpt2_generation_beam_search_multiple_prompts_with_padding() -> anyhow::Result
 
     let input_context_1 = "The dog";
     let input_context_2 = "The cat was";
-    let output = model.generate(&[input_context_1, input_context_2], None);
+    let output = model.generate(&[input_context_1, input_context_2], None)?;
 
     assert_eq!(output.len(), 6);
     assert_eq!(
@@ -306,12 +296,12 @@ fn gpt2_diverse_beam_search_multiple_prompts_with_padding() -> anyhow::Result<()
 
     let generate_config = TextGenerationConfig {
         model_type: ModelType::GPT2,
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
+        merges_resource: Some(merges_resource),
         min_length: 10,
-        max_length: 20,
+        max_length: Some(20),
         do_sample: false,
         num_beams: 6,
         num_beam_groups: Some(3),
@@ -323,7 +313,7 @@ fn gpt2_diverse_beam_search_multiple_prompts_with_padding() -> anyhow::Result<()
 
     let input_context_1 = "It was a nice and";
     let input_context_2 = "Language models can generate";
-    let output = model.generate(&[input_context_1, input_context_2], None);
+    let output = model.generate(&[input_context_1, input_context_2], None)?;
 
     assert_eq!(output.len(), 6);
     assert_eq!(
@@ -378,11 +368,11 @@ fn gpt2_prefix_allowed_token_greedy() -> anyhow::Result<()> {
     }
 
     let generate_config = GenerateConfig {
-        max_length: 56,
-        model_resource,
+        max_length: Some(56),
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
+        merges_resource: Some(merges_resource),
         do_sample: false,
         num_beams: 1,
         device: Device::Cpu,
@@ -402,7 +392,7 @@ fn gpt2_prefix_allowed_token_greedy() -> anyhow::Result<()> {
     let output = model.generate(
         Some(&[input_context_1, input_context_2]),
         Some(generate_options),
-    );
+    )?;
 
     assert_eq!(output.len(), 2);
     assert_eq!(
@@ -428,11 +418,11 @@ fn gpt2_bad_tokens_greedy() -> anyhow::Result<()> {
     let model_resource = Box::new(RemoteResource::from_pretrained(Gpt2ModelResources::GPT2));
 
     let generate_config = GenerateConfig {
-        max_length: 36,
-        model_resource,
+        max_length: Some(36),
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
+        merges_resource: Some(merges_resource),
         do_sample: false,
         num_beams: 1,
         device: Device::Cpu,
@@ -465,8 +455,9 @@ fn gpt2_bad_tokens_greedy() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let baseline_output = model.generate(Some(&[input_context_1]), Some(baseline_generate_options));
-    let output = model.generate(Some(&[input_context_1]), Some(test_generate_options));
+    let baseline_output =
+        model.generate(Some(&[input_context_1]), Some(baseline_generate_options))?;
+    let output = model.generate(Some(&[input_context_1]), Some(test_generate_options))?;
 
     assert_eq!(baseline_output.len(), 1);
     assert_eq!(
@@ -494,11 +485,11 @@ fn gpt2_bad_tokens_beam_search() -> anyhow::Result<()> {
     let model_resource = Box::new(RemoteResource::from_pretrained(Gpt2ModelResources::GPT2));
 
     let generate_config = GenerateConfig {
-        max_length: 36,
-        model_resource,
+        max_length: Some(36),
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
+        merges_resource: Some(merges_resource),
         do_sample: false,
         num_beams: 3,
         device: Device::Cpu,
@@ -531,8 +522,9 @@ fn gpt2_bad_tokens_beam_search() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let baseline_output = model.generate(Some(&[input_context_1]), Some(baseline_generate_options));
-    let output = model.generate(Some(&[input_context_1]), Some(test_generate_options));
+    let baseline_output =
+        model.generate(Some(&[input_context_1]), Some(baseline_generate_options))?;
+    let output = model.generate(Some(&[input_context_1]), Some(test_generate_options))?;
 
     assert_eq!(baseline_output.len(), 1);
     assert_eq!(
@@ -575,11 +567,11 @@ fn gpt2_prefix_allowed_token_beam_search() -> anyhow::Result<()> {
     }
 
     let generate_config = GenerateConfig {
-        max_length: 32,
-        model_resource,
+        max_length: Some(32),
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
+        merges_resource: Some(merges_resource),
         do_sample: false,
         num_beams: 3,
         device: Device::Cpu,
@@ -599,7 +591,7 @@ fn gpt2_prefix_allowed_token_beam_search() -> anyhow::Result<()> {
     let output = model.generate(
         Some(&[input_context_1, input_context_2]),
         Some(generate_options),
-    );
+    )?;
 
     assert_eq!(output.len(), 2);
     assert_eq!(
@@ -625,11 +617,11 @@ fn gpt2_greedy_token_scores() -> anyhow::Result<()> {
     let model_resource = Box::new(RemoteResource::from_pretrained(Gpt2ModelResources::GPT2));
 
     let generate_config = GenerateConfig {
-        max_length: 16,
-        model_resource,
+        max_length: Some(16),
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
+        merges_resource: Some(merges_resource),
         do_sample: false,
         num_beams: 1,
         device: Device::Cpu,
@@ -648,7 +640,7 @@ fn gpt2_greedy_token_scores() -> anyhow::Result<()> {
     let output = model.generate_indices(
         Some(&[input_context_1, input_context_2]),
         Some(generate_options),
-    );
+    )?;
 
     assert_eq!(output.len(), 2);
     assert_eq!(
@@ -681,11 +673,11 @@ fn gpt2_beam_search_token_scores() -> anyhow::Result<()> {
     let model_resource = Box::new(RemoteResource::from_pretrained(Gpt2ModelResources::GPT2));
 
     let generate_config = GenerateConfig {
-        max_length: 16,
-        model_resource,
+        max_length: Some(16),
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
+        merges_resource: Some(merges_resource),
         do_sample: false,
         num_beams: 2,
         device: Device::Cpu,
@@ -704,7 +696,7 @@ fn gpt2_beam_search_token_scores() -> anyhow::Result<()> {
     let output = model.generate_indices(
         Some(&[input_context_1, input_context_2]),
         Some(generate_options),
-    );
+    )?;
 
     assert_eq!(output.len(), 2);
     assert_eq!(
@@ -745,7 +737,7 @@ fn dialogpt_single_multi_turn_conversation() -> anyhow::Result<()> {
         conversation_manager.create("Going to the movies tonight - any suggestions?");
 
     // Turn 1
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 1);
     assert_eq!(output.get(&conversation_id).unwrap(), &"The Big Lebowski");
 
@@ -754,12 +746,12 @@ fn dialogpt_single_multi_turn_conversation() -> anyhow::Result<()> {
         .get(&conversation_id)
         .unwrap()
         .add_user_input("Is it an action movie?");
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 1);
     assert_eq!(output.get(&conversation_id).unwrap(), &"It\'s a comedy.");
 
     // Turn 3 (no new user input)
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 0);
 
     Ok(())
@@ -783,7 +775,7 @@ fn dialogpt_multiple_multi_turn_conversation() -> anyhow::Result<()> {
     let conversation_2_id = conversation_manager.create("What's the last book you have read?");
 
     // Turn 1
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 2);
     assert_eq!(output.get(&conversation_1_id).unwrap(), &"The Big Lebowski");
     assert_eq!(
@@ -796,12 +788,12 @@ fn dialogpt_multiple_multi_turn_conversation() -> anyhow::Result<()> {
         .get(&conversation_1_id)
         .unwrap()
         .add_user_input("Is it an action movie?");
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 1);
     assert_eq!(output.get(&conversation_1_id).unwrap(), &"It\'s a comedy.");
 
     // Turn 3 (no new user input)
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 0);
 
     Ok(())
@@ -812,7 +804,7 @@ fn dialogpt_multiple_multi_turn_conversation() -> anyhow::Result<()> {
 fn dialogpt_multiple_multi_turn_conversation_with_truncation() -> anyhow::Result<()> {
     //    Set-up conversation model
     let conversation_config = ConversationConfig {
-        max_length: 36,
+        max_length: Some(36),
         min_length_for_response: 24,
         do_sample: false,
         device: Device::Cpu,
@@ -827,7 +819,7 @@ fn dialogpt_multiple_multi_turn_conversation_with_truncation() -> anyhow::Result
     let conversation_2_id = conversation_manager.create("Hello how are you?");
 
     // Turn 1
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 2);
     assert_eq!(output.get(&conversation_1_id).unwrap(), &"The Big Lebowski");
     assert_eq!(
@@ -845,12 +837,12 @@ fn dialogpt_multiple_multi_turn_conversation_with_truncation() -> anyhow::Result
         .unwrap()
         .add_user_input("Fine.");
 
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 2);
     assert_eq!(output.get(&conversation_1_id).unwrap(), &"It\'s a comedy.");
 
     // Turn 3 (no new user input)
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 0);
 
     Ok(())
@@ -874,7 +866,7 @@ fn dialogpt_multiple_multi_turn_conversation_with_conversation_deletion() -> any
     let conversation_2_id = conversation_manager.create("What's the last book you have read?");
 
     // Turn 1
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 2);
     assert_eq!(output.get(&conversation_1_id).unwrap(), &"The Big Lebowski");
     assert_eq!(
@@ -888,7 +880,7 @@ fn dialogpt_multiple_multi_turn_conversation_with_conversation_deletion() -> any
         .get(&conversation_2_id)
         .unwrap()
         .add_user_input("Why do you recommend it?");
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 1);
     assert_eq!(
         output.get(&conversation_2_id).unwrap(),
@@ -896,7 +888,7 @@ fn dialogpt_multiple_multi_turn_conversation_with_conversation_deletion() -> any
     );
 
     // Turn 3 (no new user input)
-    let output = conversation_model.generate_responses(&mut conversation_manager);
+    let output = conversation_model.generate_responses(&mut conversation_manager)?;
     assert_eq!(output.len(), 0);
 
     Ok(())

@@ -1,4 +1,4 @@
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::text_generation::{TextGenerationConfig, TextGenerationModel};
 use rust_bert::resources::{RemoteResource, ResourceProvider};
 use rust_bert::xlnet::{
@@ -54,15 +54,15 @@ fn xlnet_base_model() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input[..input.len() - 2])))
+        .map(|input| Tensor::from_slice(&(input[..input.len() - 2])))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
     // Forward pass
-    let perm_mask = Tensor::zeros(&[1, 4, 4], (Kind::Float, device));
+    let perm_mask = Tensor::zeros([1, 4, 4], (Kind::Float, device));
     let _ = perm_mask.narrow(2, 3, 1).fill_(1.0);
 
-    let target_mapping = Tensor::zeros(&[1, 1, 4], (Kind::Float, device));
+    let target_mapping = Tensor::zeros([1, 1, 4], (Kind::Float, device));
     let _ = target_mapping.narrow(2, 3, 1).fill_(1.0);
     let model_output = no_grad(|| {
         xlnet_model
@@ -141,7 +141,7 @@ fn xlnet_lm_model() -> anyhow::Result<()> {
     let tokenizer: XLNetTokenizer =
         XLNetTokenizer::from_file(vocab_path.to_str().unwrap(), false, true)?;
     let config = XLNetConfig::from_file(config_path);
-    let xlnet_model = XLNetLMHeadModel::new(&vs.root(), &config);
+    let xlnet_model = XLNetLMHeadModel::new(vs.root(), &config);
     vs.load(weights_path)?;
 
     //    Define input
@@ -159,15 +159,15 @@ fn xlnet_lm_model() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input[..input.len() - 2])))
+        .map(|input| Tensor::from_slice(&(input[..input.len() - 2])))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
     // Forward pass
-    let perm_mask = Tensor::zeros(&[1, 4, 4], (Kind::Float, device));
+    let perm_mask = Tensor::zeros([1, 4, 4], (Kind::Float, device));
     let _ = perm_mask.narrow(2, 3, 1).fill_(1.0);
 
-    let target_mapping = Tensor::zeros(&[1, 1, 4], (Kind::Float, device));
+    let target_mapping = Tensor::zeros([1, 1, 4], (Kind::Float, device));
     let _ = target_mapping.narrow(2, 3, 1).fill_(1.0);
     let model_output = no_grad(|| {
         xlnet_model
@@ -202,20 +202,17 @@ fn xlnet_generation_beam_search() -> anyhow::Result<()> {
     let vocab_resource = Box::new(RemoteResource::from_pretrained(
         XLNetVocabResources::XLNET_BASE_CASED,
     ));
-    let merges_resource = Box::new(RemoteResource::from_pretrained(
-        XLNetVocabResources::XLNET_BASE_CASED,
-    ));
     let model_resource = Box::new(RemoteResource::from_pretrained(
         XLNetModelResources::XLNET_BASE_CASED,
     ));
 
     let generate_config = TextGenerationConfig {
         model_type: ModelType::XLNet,
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
-        max_length: 32,
+        merges_resource: None,
+        max_length: Some(32),
         do_sample: false,
         num_beams: 3,
         temperature: 1.0,
@@ -225,7 +222,7 @@ fn xlnet_generation_beam_search() -> anyhow::Result<()> {
     let model = TextGenerationModel::new(generate_config)?;
 
     let input_context = "Once upon a time,";
-    let output = model.generate(&[input_context], None);
+    let output = model.generate(&[input_context], None)?;
 
     assert_eq!(output.len(), 1);
     assert_eq!(
@@ -260,7 +257,7 @@ fn xlnet_for_sequence_classification() -> anyhow::Result<()> {
     config.id2label = Some(dummy_label_mapping);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let xlnet_model = XLNetForSequenceClassification::new(&vs.root(), &config)?;
+    let xlnet_model = XLNetForSequenceClassification::new(vs.root(), &config)?;
 
     //    Define input
     let input = ["Very positive sentence", "Second sentence input"];
@@ -277,7 +274,7 @@ fn xlnet_for_sequence_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -325,7 +322,7 @@ fn xlnet_for_multiple_choice() -> anyhow::Result<()> {
     let vs = nn::VarStore::new(device);
     let tokenizer = XLNetTokenizer::from_file(vocab_path.to_str().unwrap(), true, true)?;
     let config = XLNetConfig::from_file(config_path);
-    let xlnet_model = XLNetForMultipleChoice::new(&vs.root(), &config)?;
+    let xlnet_model = XLNetForMultipleChoice::new(vs.root(), &config)?;
 
     //    Define input
     let prompt = "In Italy, pizza served in formal settings, such as at a restaurant, is presented unsliced.";
@@ -351,7 +348,7 @@ fn xlnet_for_multiple_choice() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0)
         .to(device)
@@ -399,7 +396,7 @@ fn xlnet_for_token_classification() -> anyhow::Result<()> {
     dummy_label_mapping.insert(2, String::from("PER"));
     dummy_label_mapping.insert(3, String::from("ORG"));
     config.id2label = Some(dummy_label_mapping);
-    let xlnet_model = XLNetForTokenClassification::new(&vs.root(), &config)?;
+    let xlnet_model = XLNetForTokenClassification::new(vs.root(), &config)?;
 
     //    Define input
     let inputs = ["Where's Paris?", "In Kentucky, United States"];
@@ -416,7 +413,7 @@ fn xlnet_for_token_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -456,7 +453,7 @@ fn xlnet_for_question_answering() -> anyhow::Result<()> {
     let vs = nn::VarStore::new(device);
     let tokenizer = XLNetTokenizer::from_file(vocab_path.to_str().unwrap(), true, true)?;
     let config = XLNetConfig::from_file(config_path);
-    let xlnet_model = XLNetForQuestionAnswering::new(&vs.root(), &config)?;
+    let xlnet_model = XLNetForQuestionAnswering::new(vs.root(), &config)?;
 
     //    Define input
     let inputs = ["Where's Paris?", "Paris is in In Kentucky, United States"];
@@ -478,7 +475,7 @@ fn xlnet_for_question_answering() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 

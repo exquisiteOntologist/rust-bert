@@ -16,7 +16,7 @@ use rust_bert::longformer::{
     LongformerConfigResources, LongformerMergesResources, LongformerModelResources,
     LongformerVocabResources,
 };
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::question_answering::{
     QaInput, QuestionAnsweringConfig, QuestionAnsweringModel,
 };
@@ -26,7 +26,9 @@ fn main() -> anyhow::Result<()> {
     //    Set-up Question Answering model
     let config = QuestionAnsweringConfig::new(
         ModelType::Longformer,
-        RemoteResource::from_pretrained(LongformerModelResources::LONGFORMER_BASE_SQUAD1),
+        ModelResource::Torch(Box::new(RemoteResource::from_pretrained(
+            LongformerModelResources::LONGFORMER_BASE_SQUAD1,
+        ))),
         RemoteResource::from_pretrained(LongformerConfigResources::LONGFORMER_BASE_SQUAD1),
         RemoteResource::from_pretrained(LongformerVocabResources::LONGFORMER_BASE_SQUAD1),
         Some(RemoteResource::from_pretrained(
@@ -55,6 +57,6 @@ fn main() -> anyhow::Result<()> {
 
     //    Get answer
     let answers = qa_model.predict(&[qa_input_1, qa_input_2], 1, 32);
-    println!("{:?}", answers);
+    println!("{answers:?}");
     Ok(())
 }

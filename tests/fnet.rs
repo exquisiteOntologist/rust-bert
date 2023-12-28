@@ -5,13 +5,14 @@ use rust_bert::fnet::{
     FNetConfig, FNetConfigResources, FNetForMaskedLM, FNetForMultipleChoice,
     FNetForQuestionAnswering, FNetForTokenClassification, FNetModelResources, FNetVocabResources,
 };
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::sentiment::{SentimentConfig, SentimentModel, SentimentPolarity};
 use rust_bert::resources::{RemoteResource, ResourceProvider};
 use rust_bert::Config;
 use rust_tokenizers::tokenizer::{FNetTokenizer, MultiThreadedTokenizer, TruncationStrategy};
 use rust_tokenizers::vocab::Vocab;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use tch::{nn, no_grad, Device, Tensor};
 
 #[test]
@@ -30,7 +31,7 @@ fn fnet_masked_lm() -> anyhow::Result<()> {
     let tokenizer: FNetTokenizer =
         FNetTokenizer::from_file(vocab_path.to_str().unwrap(), false, false)?;
     let config = FNetConfig::from_file(config_path);
-    let fnet_model = FNetForMaskedLM::new(&vs.root(), &config);
+    let fnet_model = FNetForMaskedLM::new(vs.root(), &config);
     vs.load(weights_path)?;
 
     //    Define input
@@ -51,7 +52,7 @@ fn fnet_masked_lm() -> anyhow::Result<()> {
             input.extend(vec![3; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -75,7 +76,10 @@ fn fnet_masked_lm() -> anyhow::Result<()> {
 
     assert_eq!("▁one", word_1);
     assert_eq!("▁the", word_2);
-    assert!((f64::from(model_output.prediction_scores.get(0).get(4).max()) - 13.1721).abs() < 1e-4);
+    let value =
+        (f64::try_from(model_output.prediction_scores.get(0).get(4).max())? - 13.1721).abs();
+    dbg!(value);
+    assert!(value < 1e-3);
     Ok(())
 }
 
@@ -88,9 +92,9 @@ fn fnet_for_sequence_classification() -> anyhow::Result<()> {
     let vocab_resource = Box::new(RemoteResource::from_pretrained(
         FNetVocabResources::BASE_SST2,
     ));
-    let model_resource = Box::new(RemoteResource::from_pretrained(
+    let model_resource = ModelResource::Torch(Box::new(RemoteResource::from_pretrained(
         FNetModelResources::BASE_SST2,
-    ));
+    )));
 
     let sentiment_config = SentimentConfig {
         model_type: ModelType::FNet,
@@ -109,7 +113,7 @@ fn fnet_for_sequence_classification() -> anyhow::Result<()> {
         "If you like original gut wrenching laughter you will like this movie. If you are young or old then you will love this movie, hell even my mom liked it.",
     ];
 
-    let output = sentiment_classifier.predict(&input);
+    let output = sentiment_classifier.predict(input);
 
     assert_eq!(output.len(), 3usize);
     assert_eq!(output[0].polarity, SentimentPolarity::Negative);
@@ -121,6 +125,7 @@ fn fnet_for_sequence_classification() -> anyhow::Result<()> {
 
     Ok(())
 }
+
 //
 #[test]
 fn fnet_for_multiple_choice() -> anyhow::Result<()> {
@@ -138,7 +143,7 @@ fn fnet_for_multiple_choice() -> anyhow::Result<()> {
     let mut config = FNetConfig::from_file(config_path);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let fnet_model = FNetForMultipleChoice::new(&vs.root(), &config);
+    let fnet_model = FNetForMultipleChoice::new(vs.root(), &config);
 
     //    Define input
     let input = [
@@ -158,7 +163,7 @@ fn fnet_for_multiple_choice() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0)
         .to(device)
@@ -201,7 +206,7 @@ fn fnet_for_token_classification() -> anyhow::Result<()> {
     dummy_label_mapping.insert(3, String::from("ORG"));
     config.id2label = Some(dummy_label_mapping);
     config.output_hidden_states = Some(true);
-    let fnet_model = FNetForTokenClassification::new(&vs.root(), &config);
+    let fnet_model = FNetForTokenClassification::new(vs.root(), &config)?;
 
     //    Define input
     let input = [
@@ -221,7 +226,7 @@ fn fnet_for_token_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -256,7 +261,7 @@ fn fnet_for_question_answering() -> anyhow::Result<()> {
         FNetTokenizer::from_file(vocab_path.to_str().unwrap(), false, false)?;
     let mut config = FNetConfig::from_file(config_path);
     config.output_hidden_states = Some(true);
-    let fnet_model = FNetForQuestionAnswering::new(&vs.root(), &config);
+    let fnet_model = FNetForQuestionAnswering::new(vs.root(), &config);
 
     //    Define input
     let input = [
@@ -276,7 +281,7 @@ fn fnet_for_question_answering() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 

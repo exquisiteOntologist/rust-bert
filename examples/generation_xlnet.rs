@@ -14,7 +14,7 @@
 
 extern crate anyhow;
 
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::text_generation::{TextGenerationConfig, TextGenerationModel};
 use rust_bert::resources::RemoteResource;
 use rust_bert::xlnet::{XLNetConfigResources, XLNetModelResources, XLNetVocabResources};
@@ -27,20 +27,17 @@ fn main() -> anyhow::Result<()> {
     let vocab_resource = Box::new(RemoteResource::from_pretrained(
         XLNetVocabResources::XLNET_BASE_CASED,
     ));
-    let merges_resource = Box::new(RemoteResource::from_pretrained(
-        XLNetVocabResources::XLNET_BASE_CASED,
-    ));
     let model_resource = Box::new(RemoteResource::from_pretrained(
         XLNetModelResources::XLNET_BASE_CASED,
     ));
 
     let generate_config = TextGenerationConfig {
         model_type: ModelType::XLNet,
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
-        max_length: 32,
+        merges_resource: None,
+        max_length: Some(32),
         do_sample: false,
         num_beams: 3,
         temperature: 1.0,
@@ -50,10 +47,10 @@ fn main() -> anyhow::Result<()> {
     let model = TextGenerationModel::new(generate_config)?;
 
     let input_context = "Once upon a time,";
-    let output = model.generate(&[input_context], None);
+    let output = model.generate(&[input_context], None)?;
 
     for sentence in output {
-        println!("{}", sentence);
+        println!("{sentence}");
     }
     Ok(())
 }

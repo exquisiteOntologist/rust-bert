@@ -5,7 +5,7 @@ use criterion::{black_box, Criterion};
 use rust_bert::gpt2::{
     Gpt2ConfigResources, Gpt2MergesResources, Gpt2ModelResources, Gpt2VocabResources,
 };
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::text_generation::{TextGenerationConfig, TextGenerationModel};
 use rust_bert::resources::RemoteResource;
 use std::time::{Duration, Instant};
@@ -14,12 +14,16 @@ use tch::Device;
 fn create_text_generation_model() -> TextGenerationModel {
     let config = TextGenerationConfig {
         model_type: ModelType::GPT2,
-        model_resource: Box::new(RemoteResource::from_pretrained(Gpt2ModelResources::GPT2)),
+        model_resource: ModelResource::Torch(Box::new(RemoteResource::from_pretrained(
+            Gpt2ModelResources::GPT2,
+        ))),
         config_resource: Box::new(RemoteResource::from_pretrained(Gpt2ConfigResources::GPT2)),
         vocab_resource: Box::new(RemoteResource::from_pretrained(Gpt2VocabResources::GPT2)),
-        merges_resource: Box::new(RemoteResource::from_pretrained(Gpt2MergesResources::GPT2)),
+        merges_resource: Some(Box::new(RemoteResource::from_pretrained(
+            Gpt2MergesResources::GPT2,
+        ))),
         min_length: 0,
-        max_length: 30,
+        max_length: Some(30),
         do_sample: true,
         early_stopping: false,
         num_beams: 5,
@@ -33,6 +37,7 @@ fn create_text_generation_model() -> TextGenerationModel {
         diversity_penalty: None,
         num_return_sequences: 5,
         device: Device::cuda_if_available(),
+        kind: None,
     };
     TextGenerationModel::new(config).unwrap()
 }

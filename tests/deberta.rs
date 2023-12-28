@@ -41,7 +41,7 @@ fn deberta_natural_language_inference() -> anyhow::Result<()> {
         false,
     )?;
     let config = DebertaConfig::from_file(config_path);
-    let model = DebertaForSequenceClassification::new(&vs.root(), &config);
+    let model = DebertaForSequenceClassification::new(vs.root(), &config)?;
     vs.load(weights_path)?;
 
     //    Define input
@@ -66,7 +66,7 @@ fn deberta_natural_language_inference() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -96,13 +96,13 @@ fn deberta_masked_lm() -> anyhow::Result<()> {
     let mut config = DebertaConfig::from_file(config_path);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let deberta_model = DebertaForMaskedLM::new(&vs.root(), &config);
+    let deberta_model = DebertaForMaskedLM::new(vs.root(), &config);
 
     //    Generate random input
-    let input_tensor = Tensor::randint(42, &[32, 128], (Kind::Int64, device));
-    let attention_mask = Tensor::ones(&[32, 128], (Kind::Int64, device));
+    let input_tensor = Tensor::randint(42, [32, 128], (Kind::Int64, device));
+    let attention_mask = Tensor::ones([32, 128], (Kind::Int64, device));
     let position_ids = Tensor::arange(128, (Kind::Int64, device)).unsqueeze(0);
-    let token_type_ids = Tensor::zeros(&[32, 128], (Kind::Int64, device));
+    let token_type_ids = Tensor::zeros([32, 128], (Kind::Int64, device));
 
     //    Forward pass
     let model_output = no_grad(|| {
@@ -170,7 +170,7 @@ fn deberta_for_token_classification() -> anyhow::Result<()> {
     dummy_label_mapping.insert(2, String::from("PER"));
     dummy_label_mapping.insert(3, String::from("ORG"));
     config.id2label = Some(dummy_label_mapping);
-    let model = DebertaForTokenClassification::new(&vs.root(), &config);
+    let model = DebertaForTokenClassification::new(vs.root(), &config)?;
 
     //    Define input
     let inputs = ["Where's Paris?", "In Kentucky, United States"];
@@ -187,7 +187,7 @@ fn deberta_for_token_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -225,7 +225,7 @@ fn deberta_for_question_answering() -> anyhow::Result<()> {
         false,
     )?;
     let config = DebertaConfig::from_file(config_path);
-    let model = DebertaForQuestionAnswering::new(&vs.root(), &config);
+    let model = DebertaForQuestionAnswering::new(vs.root(), &config);
 
     //    Define input
     let inputs = ["Where's Paris?", "Paris is in In Kentucky, United States"];
@@ -247,7 +247,7 @@ fn deberta_for_question_answering() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 

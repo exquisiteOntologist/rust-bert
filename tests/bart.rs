@@ -2,12 +2,13 @@ use rust_bert::bart::{
     BartConfig, BartConfigResources, BartMergesResources, BartModel, BartModelResources,
     BartVocabResources,
 };
+use rust_bert::pipelines::common::{cast_var_store, ModelResource};
 use rust_bert::pipelines::summarization::{SummarizationConfig, SummarizationModel};
 use rust_bert::pipelines::zero_shot_classification::{
     ZeroShotClassificationConfig, ZeroShotClassificationModel,
 };
 use rust_bert::resources::{RemoteResource, ResourceProvider};
-use rust_bert::Config;
+use rust_bert::{Config, RustBertError};
 use rust_tokenizers::tokenizer::{RobertaTokenizer, Tokenizer, TruncationStrategy};
 use tch::{nn, Device, Tensor};
 
@@ -43,6 +44,7 @@ fn bart_lm_model() -> anyhow::Result<()> {
     let config = BartConfig::from_file(config_path);
     let bart_model = BartModel::new(&vs.root() / "model", &config);
     vs.load(weights_path)?;
+    cast_var_store(&mut vs, None, device);
 
     //    Define input
     let input = ["One two three four"];
@@ -59,7 +61,7 @@ fn bart_lm_model() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -90,14 +92,14 @@ fn bart_summarization_greedy() -> anyhow::Result<()> {
         BartModelResources::DISTILBART_CNN_6_6,
     ));
     let summarization_config = SummarizationConfig {
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
+        merges_resource: Some(merges_resource),
         num_beams: 1,
         length_penalty: 1.0,
         min_length: 56,
-        max_length: 142,
+        max_length: Some(142),
         device: Device::Cpu,
         ..Default::default()
     };
@@ -126,7 +128,7 @@ telescope — scheduled for launch in 2021 — and the European Space Agency's 2
 about exoplanets like K2-18b."];
 
     //    Credits: WikiNews, CC BY 2.5 license (https://en.wikinews.org/wiki/Astronomers_find_water_vapour_in_atmosphere_of_exoplanet_K2-18b)
-    let output = model.summarize(&input);
+    let output = model.summarize(&input)?;
 
     assert_eq!(output.len(), 1);
     assert_eq!(output[0], " K2-18b is not too hot and not too cold for liquid water to exist. \
@@ -151,13 +153,13 @@ fn bart_summarization_beam_search() -> anyhow::Result<()> {
         BartModelResources::DISTILBART_CNN_6_6,
     ));
     let summarization_config = SummarizationConfig {
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
+        merges_resource: Some(merges_resource),
         num_beams: 4,
         min_length: 56,
-        max_length: 142,
+        max_length: Some(142),
         length_penalty: 1.0,
         device: Device::Cpu,
         ..Default::default()
@@ -187,7 +189,7 @@ telescope — scheduled for launch in 2021 — and the European Space Agency's 2
 about exoplanets like K2-18b."];
 
     //    Credits: WikiNews, CC BY 2.5 license (https://en.wikinews.org/wiki/Astronomers_find_water_vapour_in_atmosphere_of_exoplanet_K2-18b)
-    let output = model.summarize(&input);
+    let output = model.summarize(&input)?;
 
     assert_eq!(output.len(), 1);
     assert_eq!(output[0], " K2-18b, a planet circling a star in the constellation Leo, is not too hot and not too cold for liquid water to exist. \
@@ -212,13 +214,13 @@ fn bart_zero_shot_classification() -> anyhow::Result<()> {
     let candidate_labels = &["politics", "public health", "economy", "sports"];
 
     let output = sequence_classification_model.predict(
-        &[input_sentence, input_sequence_2],
+        [input_sentence, input_sequence_2],
         candidate_labels,
         Some(Box::new(|label: &str| {
-            format!("This example is about {}.", label)
+            format!("This example is about {label}.")
         })),
         128,
-    );
+    )?;
 
     assert_eq!(output.len(), 2);
 
@@ -227,6 +229,34 @@ fn bart_zero_shot_classification() -> anyhow::Result<()> {
     assert!((output[0].score - 0.9630).abs() < 1e-4);
     assert_eq!(output[1].text, "economy");
     assert!((output[1].score - 0.6416).abs() < 1e-4);
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(not(feature = "all-tests"), ignore)]
+fn bart_zero_shot_classification_try_error() -> anyhow::Result<()> {
+    //    Set-up model
+    let zero_shot_config = ZeroShotClassificationConfig {
+        device: Device::Cpu,
+        ..Default::default()
+    };
+    let sequence_classification_model = ZeroShotClassificationModel::new(zero_shot_config)?;
+
+    let output = sequence_classification_model.predict(
+        [],
+        [],
+        Some(Box::new(|label: &str| {
+            format!("This example is about {label}.")
+        })),
+        128,
+    );
+
+    let output_is_error = match output {
+        Err(RustBertError::ValueError(_)) => true,
+        _ => unreachable!(),
+    };
+    assert!(output_is_error);
+
     Ok(())
 }
 
@@ -245,13 +275,13 @@ fn bart_zero_shot_classification_multilabel() -> anyhow::Result<()> {
     let candidate_labels = &["politics", "public health", "economy", "sports"];
 
     let output = sequence_classification_model.predict_multilabel(
-        &[input_sentence, input_sequence_2],
+        [input_sentence, input_sequence_2],
         candidate_labels,
         Some(Box::new(|label: &str| {
-            format!("This example is about {}.", label)
+            format!("This example is about {label}.")
         })),
         128,
-    );
+    )?;
 
     assert_eq!(output.len(), 2);
     assert_eq!(output[0].len(), candidate_labels.len());
@@ -274,5 +304,33 @@ fn bart_zero_shot_classification_multilabel() -> anyhow::Result<()> {
     assert!((output[1][2].score - 0.9851).abs() < 1e-4);
     assert_eq!(output[1][3].text, "sports");
     assert!((output[1][3].score - 0.0004).abs() < 1e-4);
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(not(feature = "all-tests"), ignore)]
+fn bart_zero_shot_classification_multilabel_try_error() -> anyhow::Result<()> {
+    //    Set-up model
+    let zero_shot_config = ZeroShotClassificationConfig {
+        device: Device::Cpu,
+        ..Default::default()
+    };
+    let sequence_classification_model = ZeroShotClassificationModel::new(zero_shot_config)?;
+
+    let output = sequence_classification_model.predict_multilabel(
+        [],
+        [],
+        Some(Box::new(|label: &str| {
+            format!("This example is about {label}.")
+        })),
+        128,
+    );
+
+    let output_is_error = match output {
+        Err(RustBertError::ValueError(_)) => true,
+        _ => unreachable!(),
+    };
+    assert!(output_is_error);
+
     Ok(())
 }

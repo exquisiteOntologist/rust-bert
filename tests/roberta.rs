@@ -1,4 +1,4 @@
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::ner::NERModel;
 use rust_bert::pipelines::question_answering::{
     QaInput, QuestionAnsweringConfig, QuestionAnsweringModel,
@@ -41,7 +41,7 @@ fn roberta_masked_lm() -> anyhow::Result<()> {
         false,
     )?;
     let config = RobertaConfig::from_file(config_path);
-    let roberta_model = RobertaForMaskedLM::new(&vs.root(), &config);
+    let roberta_model = RobertaForMaskedLM::new(vs.root(), &config);
     vs.load(weights_path)?;
 
     //    Define input
@@ -69,7 +69,7 @@ fn roberta_masked_lm() -> anyhow::Result<()> {
     tokenized_input[1][5] = 103;
     let tokenized_input = tokenized_input
         .iter()
-        .map(|input| Tensor::of_slice(input))
+        .map(|input| Tensor::from_slice(input))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -136,7 +136,7 @@ fn roberta_for_sequence_classification() -> anyhow::Result<()> {
     config.id2label = Some(dummy_label_mapping);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let roberta_model = RobertaForSequenceClassification::new(&vs.root(), &config);
+    let roberta_model = RobertaForSequenceClassification::new(vs.root(), &config)?;
 
     //    Define input
     let input = [
@@ -156,7 +156,7 @@ fn roberta_for_sequence_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -201,7 +201,7 @@ fn roberta_for_multiple_choice() -> anyhow::Result<()> {
     let mut config = RobertaConfig::from_file(config_path);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let roberta_model = RobertaForMultipleChoice::new(&vs.root(), &config);
+    let roberta_model = RobertaForMultipleChoice::new(vs.root(), &config);
 
     //    Define input
     let input = [
@@ -221,7 +221,7 @@ fn roberta_for_multiple_choice() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0)
         .to(device)
@@ -273,7 +273,7 @@ fn roberta_for_token_classification() -> anyhow::Result<()> {
     config.id2label = Some(dummy_label_mapping);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let roberta_model = RobertaForTokenClassification::new(&vs.root(), &config);
+    let roberta_model = RobertaForTokenClassification::new(vs.root(), &config)?;
 
     //    Define input
     let input = [
@@ -293,7 +293,7 @@ fn roberta_for_token_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -319,7 +319,9 @@ fn roberta_question_answering() -> anyhow::Result<()> {
     //    Set-up question answering model
     let config = QuestionAnsweringConfig::new(
         ModelType::Roberta,
-        RemoteResource::from_pretrained(RobertaModelResources::ROBERTA_QA),
+        ModelResource::Torch(Box::new(RemoteResource::from_pretrained(
+            RobertaModelResources::ROBERTA_QA,
+        ))),
         RemoteResource::from_pretrained(RobertaConfigResources::ROBERTA_QA),
         RemoteResource::from_pretrained(RobertaVocabResources::ROBERTA_QA),
         Some(RemoteResource::from_pretrained(
@@ -354,9 +356,9 @@ fn xlm_roberta_german_ner() -> anyhow::Result<()> {
     //    Set-up question answering model
     let ner_config = TokenClassificationConfig {
         model_type: ModelType::XLMRoberta,
-        model_resource: Box::new(RemoteResource::from_pretrained(
+        model_resource: ModelResource::Torch(Box::new(RemoteResource::from_pretrained(
             RobertaModelResources::XLM_ROBERTA_NER_DE,
-        )),
+        ))),
         config_resource: Box::new(RemoteResource::from_pretrained(
             RobertaConfigResources::XLM_ROBERTA_NER_DE,
         )),

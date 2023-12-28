@@ -26,7 +26,7 @@ fn distilbert_sentiment_classifier() -> anyhow::Result<()> {
         "If you like original gut wrenching laughter you will like this movie. If you are young or old then you will love this movie, hell even my mom liked it.",
     ];
 
-    let output = sentiment_classifier.predict(&input);
+    let output = sentiment_classifier.predict(input);
 
     assert_eq!(output.len(), 3usize);
     assert_eq!(output[0].polarity, SentimentPolarity::Positive);
@@ -61,7 +61,7 @@ fn distilbert_masked_lm() -> anyhow::Result<()> {
     let tokenizer: BertTokenizer =
         BertTokenizer::from_file(vocab_path.to_str().unwrap(), true, true)?;
     let config = DistilBertConfig::from_file(config_path);
-    let distil_bert_model = DistilBertModelMaskedLM::new(&vs.root(), &config);
+    let distil_bert_model = DistilBertModelMaskedLM::new(vs.root(), &config);
     vs.load(weights_path)?;
 
     //    Define input
@@ -89,7 +89,7 @@ fn distilbert_masked_lm() -> anyhow::Result<()> {
     tokenized_input[1][6] = 103;
     let tokenized_input = tokenized_input
         .iter()
-        .map(|input| Tensor::of_slice(input))
+        .map(|input| Tensor::from_slice(input))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -140,7 +140,7 @@ fn distilbert_for_question_answering() -> anyhow::Result<()> {
     let mut config = DistilBertConfig::from_file(config_path);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let distil_bert_model = DistilBertForQuestionAnswering::new(&vs.root(), &config);
+    let distil_bert_model = DistilBertForQuestionAnswering::new(vs.root(), &config);
 
     //    Define input
     let input = [
@@ -160,7 +160,7 @@ fn distilbert_for_question_answering() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -211,7 +211,7 @@ fn distilbert_for_token_classification() -> anyhow::Result<()> {
     dummy_label_mapping.insert(2, String::from("PER"));
     dummy_label_mapping.insert(3, String::from("ORG"));
     config.id2label = Some(dummy_label_mapping);
-    let distil_bert_model = DistilBertForTokenClassification::new(&vs.root(), &config);
+    let distil_bert_model = DistilBertForTokenClassification::new(vs.root(), &config)?;
 
     //    Define input
     let input = [
@@ -231,7 +231,7 @@ fn distilbert_for_token_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 

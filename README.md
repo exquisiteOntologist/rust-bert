@@ -5,7 +5,7 @@
 [![Documentation](https://docs.rs/rust-bert/badge.svg)](https://docs.rs/rust-bert)
 ![License](https://img.shields.io/crates/l/rust_bert.svg)
 
-Rust-native state-of-the-art Natural Language Processing models and pipelines. Port of Hugging Face's [Transformers library](https://github.com/huggingface/transformers), using the [tch-rs](https://github.com/LaurentMazare/tch-rs) crate and pre-processing from [rust-tokenizers](https://github.com/guillaume-be/rust-tokenizers). Supports multi-threaded tokenization and GPU inference.
+Rust-native state-of-the-art Natural Language Processing models and pipelines. Port of Hugging Face's [Transformers library](https://github.com/huggingface/transformers), using [tch-rs](https://github.com/LaurentMazare/tch-rs) or [onnxruntime bindings](https://github.com/pykeio/ort) and pre-processing from [rust-tokenizers](https://github.com/guillaume-be/rust-tokenizers). Supports multi-threaded tokenization and GPU inference.
 This repository exposes the model base architecture, task-specific heads (see below) and [ready-to-use pipelines](#ready-to-use-pipelines). [Benchmarks](#benchmarks) are available at the end of this document.
 
 Get started with tasks including question answering, named entity recognition, translation, summarization, text generation, conversational agents and more in just a few lines of code:
@@ -33,7 +33,9 @@ The tasks currently supported include:
   - Part of Speech tagging
   - Question-Answering
   - Language Generation
+  - Masked Language Model
   - Sentence Embeddings
+  - Keywords extraction
 
 <details>
 <summary> <b>Expand to display the supported models/tasks matrix </b> </summary>
@@ -50,13 +52,16 @@ RoBERTa|✅|✅|✅| | | |✅| ✅|
 GPT| | | |✅ | | | |  |
 GPT2| | | |✅ | | | |  |
 GPT-Neo| | | |✅ | | | | | 
+GPT-J| | | |✅ | | | | | 
 BART|✅| | |✅ |✅| | | |
 Marian| | | |  | |✅| |  |
 MBart|✅| | |✅ | | | |  |
 M2M100| | | |✅ | | | |  |
+NLLB| | | |✅ | | | |  |
 Electra | |✅| | | | |✅|  |
 ALBERT |✅|✅|✅| | | |✅| ✅ |
 T5 | | | |✅ |✅|✅| | ✅ |
+LongT5 | | | |✅ |✅|| | |
 XLNet|✅|✅|✅|✅ | | |✅|  |
 Reformer|✅| |✅|✅ | | |✅|  |
 ProphetNet| | | |✅ |✅ | | |  |
@@ -75,8 +80,8 @@ This cache location defaults to `~/.cache/.rustbert`, but can be changed by sett
 
 ### Manual installation (recommended)
 
-1. Download `libtorch` from https://pytorch.org/get-started/locally/. This package requires `v1.12.0`: if this version is no longer available on the "get started" page,
-the file should be accessible by modifying the target link, for example `https://download.pytorch.org/libtorch/cu116/libtorch-cxx11-abi-shared-with-deps-1.12.0%2Bcu116.zip` for a Linux version with CUDA11.
+1. Download `libtorch` from https://pytorch.org/get-started/locally/. This package requires `v2.1`: if this version is no longer available on the "get started" page,
+the file should be accessible by modifying the target link, for example `https://download.pytorch.org/libtorch/cu118/libtorch-cxx11-abi-shared-with-deps-2.1.1%2Bcu118.zip` for a Linux version with CUDA11. **NOTE:** When using `rust-bert` as dependency from [crates.io](https://crates.io), please check the required `LIBTORCH` on the published package [readme](https://crates.io/crates/rust-bert) as it may differ from the version documented here (applying to the current repository version).
 2. Extract the library to a location of your choice
 3. Set the following environment variables
 ##### Linux:
@@ -91,11 +96,54 @@ $Env:LIBTORCH = "X:\path\to\libtorch"
 $Env:Path += ";X:\path\to\libtorch\lib"
 ```
 
+#### macOS + Homebrew
+```bash
+brew install pytorch jq
+export LIBTORCH=$(brew --cellar pytorch)/$(brew info --json pytorch | jq -r '.[0].installed[0].version')
+export LD_LIBRARY_PATH=${LIBTORCH}/lib:$LD_LIBRARY_PATH
+```
+
 ### Automatic installation
 
-Alternatively, you can let the `build` script automatically download the `libtorch` library for you.
-The CPU version of libtorch will be downloaded by default. To download a CUDA version, please set the environment variable `TORCH_CUDA_VERSION` to `cu113`.
+Alternatively, you can let the `build` script automatically download the `libtorch` library for you. The `download-libtorch` feature flag needs to be enabled.
+The CPU version of libtorch will be downloaded by default. To download a CUDA version, please set the environment variable `TORCH_CUDA_VERSION` to `cu118`.
 Note that the libtorch library is large (order of several GBs for the CUDA-enabled version) and the first build may therefore take several minutes to complete.
+
+### Verifying installation
+
+Verify your installation (and linking with libtorch) by adding the `rust-bert` dependency to your `Cargo.toml` or by cloning the rust-bert source and running an example:
+
+```bash
+git clone git@github.com:guillaume-be/rust-bert.git
+cd rust-bert
+cargo run --example sentence_embeddings
+```
+
+## ONNX Support (Optional)
+
+ONNX support can be enabled via the optional `onnx` feature. This crate then leverages the [ort](https://github.com/pykeio/ort) crate with bindings to the onnxruntime C++ library. We refer the user to this page project for further installation instructions/support.
+1. Enable the optional `onnx` feature. The `rust-bert` crate does not include any optional dependencies for `ort`, the end user should select the set of features that would be adequate for pulling the required `onnxruntime` C++ library. 
+2. The current recommended installation is to use dynamic linking by pointing to an existing library location. Use the `load-dynamic` cargo feature for `ort`.
+3. set the `ORT_DYLIB_PATH` to point to the location of downloaded onnxruntime library (`onnxruntime.dll`/`libonnxruntime.so`/`libonnxruntime.dylib` depending on the operating system). These can be downloaded from the [release page](https://github.com/microsoft/onnxruntime/releases) of the onnxruntime project
+
+Most architectures (including encoders, decoders and encoder-decoders) are supported. the library aims at keeping compatibility with models exported using the [optimum](https://github.com/huggingface/optimum) library. A detailed guide on how to export a Transformer model to ONNX using optimum is available at https://huggingface.co/docs/optimum/main/en/exporters/onnx/usage_guides/export_a_model
+The resources used to create ONNX models are similar to those based on Pytorch, replacing the pytorch by the ONNX model. Since ONNX models are less flexible than their Pytorch counterparts in the handling of optional arguments, exporting a decoder or encoder-decoder model to ONNX will usually result in multiple files. These files are expected (but not all are necessary) for use in this library as per the table below:
+
+| Architecture                | Encoder file  | Decoder without past file | Decoder with past file  |
+|-----------------------------|---------------|---------------------------|-------------------------|
+|  Encoder (e.g. BERT)        | required      | not used                  | not used                |
+|  Decoder (e.g. GPT2)        | not used      | required                  | optional                |
+| Encoder-decoder (e.g. BART) | required      | required                  | optional                |
+
+Note that the computational efficiency will drop when the `decoder with past` file is optional but not provided
+since the model will not used cached past keys and values for the attention mechanism, leading to a high number of
+redundant computations. The Optimum library offers export options to ensure such a `decoder with past` model file is created.
+he base encoder and decoder model architecture are available (and exposed for convenience) in the `encoder` and `decoder` modules, respectively.
+
+Generation models (pure decoder or encoder/decoder architectures) are available in the `models` module.
+ost pipelines are available for ONNX model checkpoints, including sequence classification, zero-shot classification,
+token classification (including named entity recognition and part-of-speech tagging), question answering, text generation, summarization and translation.
+These models use the same configuration and tokenizer files as their Pytorch counterparts when used in a pipeline. Examples leveraging ONNX models are given in the `./examples` directory
 
 ## Ready-to-use pipelines
 	
@@ -360,7 +408,37 @@ Output:
 </details>
 &nbsp;  
 <details>
-<summary> <b>9. Part of Speech tagging </b> </summary>
+<summary> <b>9. Keywords/keyphrases extraction</b> </summary>
+
+Extract keywords and keyphrases extractions from input documents
+
+```rust
+fn main() -> anyhow::Result<()> {
+    let keyword_extraction_model = KeywordExtractionModel::new(Default::default())?;
+    
+    let input = "Rust is a multi-paradigm, general-purpose programming language. \
+       Rust emphasizes performance, type safety, and concurrency. Rust enforces memory safety—that is, \
+       that all references point to valid memory—without requiring the use of a garbage collector or \
+       reference counting present in other memory-safe languages. To simultaneously enforce \
+       memory safety and prevent concurrent data races, Rust's borrow checker tracks the object lifetime \
+       and variable scope of all references in a program during compilation. Rust is popular for \
+       systems programming but also offers high-level features including functional programming constructs.";
+
+    let output = keyword_extraction_model.predict(&[input])?;
+}
+```
+Output:
+```
+"rust" - 0.50910604
+"programming" - 0.35731024
+"concurrency" - 0.33825397
+"concurrent" - 0.31229728
+"program" - 0.29115444
+```
+</details>
+&nbsp;  
+<details>
+<summary> <b>10. Part of Speech tagging </b> </summary>
 
 Extracts Part of Speech tags (Noun, Verb, Adjective...) from text.
 ```rust
@@ -382,7 +460,7 @@ Output:
 </details>
 &nbsp;  
 <details>
-<summary> <b>10. Sentence embeddings </b> </summary>
+<summary> <b>11. Sentence embeddings </b> </summary>
 
 Generate sentence embeddings (vector representation). These can be used for applications including dense information retrieval.
 ```rust
@@ -395,13 +473,39 @@ Generate sentence embeddings (vector representation). These can be used for appl
         "each sentence is converted"
     ];
     
-    let output = model.predict(&sentences);
+    let output = model.encode(&sentences)?;
 ```
 Output:
 ```
 [
     [-0.000202666, 0.08148022, 0.03136178, 0.002920636 ...],
     [0.064757116, 0.048519745, -0.01786038, -0.0479775 ...]
+]
+```
+</details>
+&nbsp;  
+<details>
+<summary> <b>12. Masked Language Model </b> </summary>
+
+Predict masked words in input sentences.
+```rust
+    let model = MaskedLanguageModel::new(Default::default())?;
+
+    let sentences = [
+        "Hello I am a <mask> student",
+        "Paris is the <mask> of France. It is <mask> in Europe.",
+    ];
+    
+    let output = model.predict(&sentences);
+```
+Output:
+```
+[
+    [MaskedToken { text: "college", id: 2267, score: 8.091}],
+    [
+        MaskedToken { text: "capital", id: 3007, score: 16.7249}, 
+        MaskedToken { text: "located", id: 2284, score: 9.0452}
+    ]
 ]
 ```
 </details>

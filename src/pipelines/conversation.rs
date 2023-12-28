@@ -20,7 +20,7 @@
 //!
 //!
 //! The dependencies will be downloaded to the user's home directory, under ~/.cache/.rustbert/dialgpt-medium
-//!
+//! The following illustrates how to run a 2-turns conversation using a conversation manager:
 //! ```no_run
 //! # fn main() -> anyhow::Result<()> {
 //! use rust_bert::pipelines::conversation::{ConversationManager, ConversationModel};
@@ -30,15 +30,24 @@
 //! let conversation_id =
 //!     conversation_manager.create("Going to the movies tonight - any suggestions?");
 //! let output = conversation_model.generate_responses(&mut conversation_manager);
+//!
+//! let _ = conversation_manager
+//!     .get(&conversation_id)
+//!     .unwrap()
+//!     .add_user_input("Is it an action movie?")?;
+//!
+//! let output = conversation_model.generate_responses(&mut conversation_manager);
+//!
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! Example output: \
 //! ```no_run
-//! # let output =
-//! "The Big Lebowski."
-//! # ;
+//! # let output = [
+//! "{a0cb3c15-9a5a-4a34-958d-95eddac0215a: \"The Big Lebowski\"}",
+//! "{a0cb3c15-9a5a-4a34-958d-95eddac0215a: \"It's a comedy.\"}"
+//! # ];
 //! ```
 //!
 //! # Disclaimer
@@ -46,7 +55,7 @@
 //! from the 3rd party utilization of the pretrained system.
 use crate::common::error::RustBertError;
 use crate::gpt2::GPT2Generator;
-use crate::pipelines::common::{ModelType, TokenizerOption};
+use crate::pipelines::common::{ModelResource, ModelType, TokenizerOption};
 use crate::pipelines::generation_utils::private_generation_utils::PrivateLanguageGenerator;
 use crate::pipelines::generation_utils::{GenerateConfig, LanguageGenerator};
 use crate::resources::ResourceProvider;
@@ -67,17 +76,17 @@ pub struct ConversationConfig {
     /// Model type
     pub model_type: ModelType,
     /// Model weights resource (default: DialoGPT-medium)
-    pub model_resource: Box<dyn ResourceProvider + Send>,
+    pub model_resource: ModelResource,
     /// Config resource (default: DialoGPT-medium)
     pub config_resource: Box<dyn ResourceProvider + Send>,
     /// Vocab resource (default: DialoGPT-medium)
     pub vocab_resource: Box<dyn ResourceProvider + Send>,
     /// Merges resource (default: DialoGPT-medium)
-    pub merges_resource: Box<dyn ResourceProvider + Send>,
+    pub merges_resource: Option<Box<dyn ResourceProvider + Send>>,
     /// Minimum sequence length (default: 0)
     pub min_length: i64,
     /// Maximum sequence length (default: 20)
-    pub max_length: i64,
+    pub max_length: Option<i64>,
     /// Minimum free length available for generated responses (default: 32)
     pub min_length_for_response: i64,
     /// Sampling flag. If true, will perform top-k and/or nucleus sampling on generated tokens, otherwise greedy (deterministic) decoding (default: true)
@@ -106,6 +115,8 @@ pub struct ConversationConfig {
     pub diversity_penalty: Option<f64>,
     /// Device to place the model on (default: CUDA/GPU when available)
     pub device: Device,
+    /// Model weights precision. If not provided, will default to full precision on CPU, or the loaded weights precision otherwise
+    pub kind: Option<Kind>,
 }
 
 #[cfg(feature = "remote")]
@@ -113,20 +124,20 @@ impl Default for ConversationConfig {
     fn default() -> ConversationConfig {
         ConversationConfig {
             model_type: ModelType::GPT2,
-            model_resource: Box::new(RemoteResource::from_pretrained(
+            model_resource: ModelResource::Torch(Box::new(RemoteResource::from_pretrained(
                 Gpt2ModelResources::DIALOGPT_MEDIUM,
-            )),
+            ))),
             config_resource: Box::new(RemoteResource::from_pretrained(
                 Gpt2ConfigResources::DIALOGPT_MEDIUM,
             )),
             vocab_resource: Box::new(RemoteResource::from_pretrained(
                 Gpt2VocabResources::DIALOGPT_MEDIUM,
             )),
-            merges_resource: Box::new(RemoteResource::from_pretrained(
+            merges_resource: Some(Box::new(RemoteResource::from_pretrained(
                 Gpt2MergesResources::DIALOGPT_MEDIUM,
-            )),
+            ))),
             min_length: 0,
-            max_length: 1000,
+            max_length: Some(1000),
             min_length_for_response: 64,
             do_sample: true,
             early_stopping: false,
@@ -141,6 +152,7 @@ impl Default for ConversationConfig {
             num_beam_groups: None,
             diversity_penalty: None,
             device: Device::cuda_if_available(),
+            kind: None,
         }
     }
 }
@@ -148,6 +160,7 @@ impl Default for ConversationConfig {
 impl From<ConversationConfig> for GenerateConfig {
     fn from(config: ConversationConfig) -> GenerateConfig {
         GenerateConfig {
+            model_type: config.model_type,
             model_resource: config.model_resource,
             config_resource: config.config_resource,
             merges_resource: config.merges_resource,
@@ -167,6 +180,7 @@ impl From<ConversationConfig> for GenerateConfig {
             num_beam_groups: config.num_beam_groups,
             diversity_penalty: config.diversity_penalty,
             device: config.device,
+            kind: config.kind,
         }
     }
 }
@@ -240,7 +254,7 @@ impl Conversation {
     /// use rust_bert::pipelines::conversation::Conversation;
     ///
     /// let mut conversation = Conversation::new_empty();
-    /// conversation.add_user_input("Hi there!");
+    /// conversation.add_user_input("Hi there!").unwrap();
     /// ```
     pub fn add_user_input(&mut self, text: &str) -> Result<(), RustBertError> {
         if self.new_user_input.is_some() {
@@ -270,7 +284,9 @@ impl Conversation {
     /// use rust_bert::pipelines::conversation::Conversation;
     ///
     /// let mut conversation = Conversation::new_empty();
-    /// conversation.add_user_input("This input will not be used");
+    /// conversation
+    ///     .add_user_input("This input will not be used")
+    ///     .unwrap();
     /// let unused_string = conversation.add_user_input_with_overwrite("Hi there!");
     /// ```
     pub fn add_user_input_with_overwrite(&mut self, text: &str) -> Option<String> {
@@ -296,7 +312,9 @@ impl Conversation {
     ///
     /// let mut conversation = Conversation::new_empty();
     /// let false_value = conversation.contains_new_input();
-    /// conversation.add_user_input("This input will not be used");
+    /// conversation
+    ///     .add_user_input("This input will not be used")
+    ///     .unwrap();
     /// let true_value = conversation.contains_new_input();
     /// ```
     pub fn contains_new_input(&self) -> bool {
@@ -313,7 +331,9 @@ impl Conversation {
     ///
     /// let mut conversation = Conversation::new_empty();
     /// let false_value = conversation.contains_new_input();
-    /// conversation.add_user_input("This input will not be used");
+    /// conversation
+    ///     .add_user_input("This input will not be used")
+    ///     .unwrap();
     /// let true_value = conversation.contains_new_input();
     /// conversation.mark_processed();
     /// let false_value = conversation.contains_new_input();
@@ -340,7 +360,9 @@ impl Conversation {
     ///
     /// let mut conversation = Conversation::new_empty();
     /// let none_value = conversation.get_last_input();
-    /// conversation.add_user_input("This input will not be used");
+    /// conversation
+    ///     .add_user_input("This input will not be used")
+    ///     .unwrap();
     /// let last_provided_input = conversation.get_last_input();
     /// assert_eq!(last_provided_input, Some("This input will not be used"));
     /// ```
@@ -691,6 +713,22 @@ impl ConversationOption {
         }
     }
 
+    pub fn new_with_tokenizer(
+        config: ConversationConfig,
+        tokenizer: TokenizerOption,
+    ) -> Result<Self, RustBertError> {
+        match config.model_type {
+            ModelType::GPT2 => Ok(ConversationOption::GPT2(GPT2Generator::new_with_tokenizer(
+                config.into(),
+                tokenizer,
+            )?)),
+            _ => Err(RustBertError::InvalidConfigurationError(
+                "GPT2 is currently the only supported model for conversation generation"
+                    .to_string(),
+            )),
+        }
+    }
+
     pub fn get_eos_id(&self) -> Result<i64, RustBertError> {
         match self {
             Self::GPT2(model_ref) => {
@@ -699,9 +737,17 @@ impl ConversationOption {
         }
     }
 
+    /// Get a reference to the model tokenizer.
     pub fn get_tokenizer(&self) -> &TokenizerOption {
         match self {
             Self::GPT2(model_ref) => model_ref._get_tokenizer(),
+        }
+    }
+
+    /// Get a mutable reference to the model tokenizer.
+    pub fn get_tokenizer_mut(&mut self) -> &TokenizerOption {
+        match self {
+            Self::GPT2(model_ref) => model_ref._get_tokenizer_mut(),
         }
     }
 
@@ -717,14 +763,14 @@ impl ConversationOption {
         &self,
         input_ids: Tensor,
         attention_mask: Option<Tensor>,
-    ) -> Vec<Vec<i64>> {
-        match *self {
+    ) -> Result<Vec<Vec<i64>>, RustBertError> {
+        Ok(match *self {
             Self::GPT2(ref model) => model
-                .generate_from_ids_and_past(input_ids, attention_mask, None)
+                .generate_from_ids_and_past(input_ids, attention_mask, None)?
                 .into_iter()
                 .map(|output| output.indices)
                 .collect(),
-        }
+        })
     }
 }
 
@@ -733,7 +779,7 @@ impl ConversationOption {
 pub struct ConversationModel {
     model: ConversationOption,
     eos_token_id: i64,
-    max_allowed_context_length: i64,
+    max_allowed_context_length: Option<i64>,
     device: Device,
 }
 
@@ -757,10 +803,54 @@ impl ConversationModel {
     pub fn new(
         conversation_config: ConversationConfig,
     ) -> Result<ConversationModel, RustBertError> {
-        let max_allowed_length =
-            conversation_config.max_length - conversation_config.min_length_for_response;
+        let max_allowed_length = conversation_config
+            .max_length
+            .map(|max_length| max_length - conversation_config.min_length_for_response);
         let device = conversation_config.device;
         let model = ConversationOption::new(conversation_config)?;
+        let eos_token_id = model.get_eos_id()?;
+        Ok(ConversationModel {
+            model,
+            eos_token_id,
+            max_allowed_context_length: max_allowed_length,
+            device,
+        })
+    }
+
+    /// Build a new `ConversationModel` with a provided tokenizer.
+    ///
+    /// # Arguments
+    ///
+    /// * `conversation_config` - `ConversationConfig` object containing the resource references (model, vocabulary, configuration), conversation options and device placement (CPU/GPU)
+    /// * `tokenizer` - `TokenizerOption` tokenizer to use for conversation
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # fn main() -> anyhow::Result<()> {
+    /// use rust_bert::pipelines::common::{ModelType, TokenizerOption};
+    /// use rust_bert::pipelines::conversation::ConversationModel;
+    /// let tokenizer = TokenizerOption::from_file(
+    ///     ModelType::GPT2,
+    ///     "path/to/vocab.json",
+    ///     Some("path/to/merges.txt"),
+    ///     false,
+    ///     None,
+    ///     None,
+    /// )?;
+    /// let conversation_model = ConversationModel::new_with_tokenizer(Default::default(), tokenizer)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn new_with_tokenizer(
+        conversation_config: ConversationConfig,
+        tokenizer: TokenizerOption,
+    ) -> Result<ConversationModel, RustBertError> {
+        let max_allowed_length = conversation_config
+            .max_length
+            .map(|max_length| max_length - conversation_config.min_length_for_response);
+        let device = conversation_config.device;
+        let model = ConversationOption::new_with_tokenizer(conversation_config, tokenizer)?;
         let eos_token_id = model.get_eos_id()?;
         Ok(ConversationModel {
             model,
@@ -797,9 +887,9 @@ impl ConversationModel {
     pub fn generate_responses<'a>(
         &self,
         conversation_manager: &'a mut ConversationManager,
-    ) -> HashMap<&'a Uuid, &'a str> {
+    ) -> Result<HashMap<&'a Uuid, &'a str>, RustBertError> {
         let (active_uuid, active_conversations) = conversation_manager.get_active_conversations();
-        if !active_uuid.is_empty() {
+        let updated_conversations = if !active_uuid.is_empty() {
             let texts = active_conversations
                 .iter()
                 .map(|c| c.new_user_input.as_ref().unwrap().as_str())
@@ -816,7 +906,7 @@ impl ConversationModel {
             let input_length = *input_tensor.size().last().unwrap() as usize;
             let mut generated = self
                 .model
-                .generate_from_ids_and_past(input_tensor, Some(attention_mask));
+                .generate_from_ids_and_past(input_tensor, Some(attention_mask))?;
             let removed_padding_quantities = self.clean_padding_indices(&mut generated);
 
             let mut output = HashMap::with_capacity(active_uuid.len());
@@ -846,7 +936,8 @@ impl ConversationModel {
             output
         } else {
             HashMap::new()
-        }
+        };
+        Ok(updated_conversations)
     }
 
     fn clean_padding_indices(&self, model_output: &mut Vec<Vec<i64>>) -> Vec<(usize, usize)> {
@@ -904,17 +995,18 @@ impl ConversationModel {
 
         let truncated_concatenated_inputs = concatenated_inputs
             .iter()
-            .map(|input| {
-                if input.len() > self.max_allowed_context_length as usize {
+            .map(|input| match self.max_allowed_context_length {
+                Some(max_allowed_context_length)
+                    if input.len() > max_allowed_context_length as usize =>
+                {
                     let start = self.get_truncated_input_index(
                         input,
-                        self.max_allowed_context_length as usize,
+                        max_allowed_context_length as usize,
                         pad_token,
                     );
                     &input[start..]
-                } else {
-                    input.as_slice()
                 }
+                _ => input.as_slice(),
             })
             .collect::<Vec<&[i64]>>();
 
@@ -925,7 +1017,7 @@ impl ConversationModel {
             .unwrap();
 
         let attention_mask = Tensor::ones(
-            &[inputs.len() as i64, max_len as i64],
+            [inputs.len() as i64, max_len as i64],
             (Kind::Int8, self.device),
         );
 
@@ -941,7 +1033,7 @@ impl ConversationModel {
                 padded_input.extend(input);
                 padded_input
             })
-            .map(|tokens| Tensor::of_slice(&tokens).to(self.device))
+            .map(|tokens| Tensor::from_slice(&tokens).to(self.device))
             .collect::<Vec<Tensor>>();
 
         (Tensor::stack(&concatenated_inputs, 0), attention_mask)
@@ -1001,7 +1093,9 @@ impl ConversationModel {
                     .convert_tokens_to_ids(&prompt_tokens)
             })
             .map(|mut tokens| {
-                tokens.truncate(self.max_allowed_context_length as usize - 1);
+                if let Some(max_allowed_context_length) = self.max_allowed_context_length {
+                    tokens.truncate(max_allowed_context_length as usize - 1);
+                }
                 tokens.push(self.eos_token_id);
                 tokens
             })

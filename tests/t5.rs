@@ -1,4 +1,4 @@
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::summarization::{SummarizationConfig, SummarizationModel};
 use rust_bert::pipelines::translation::{Language, TranslationConfig, TranslationModel};
 use rust_bert::resources::RemoteResource;
@@ -10,7 +10,6 @@ fn test_translation_t5() -> anyhow::Result<()> {
     let model_resource = RemoteResource::from_pretrained(T5ModelResources::T5_SMALL);
     let config_resource = RemoteResource::from_pretrained(T5ConfigResources::T5_SMALL);
     let vocab_resource = RemoteResource::from_pretrained(T5VocabResources::T5_SMALL);
-    let merges_resource = RemoteResource::from_pretrained(T5VocabResources::T5_SMALL);
 
     let source_languages = [
         Language::English,
@@ -27,10 +26,10 @@ fn test_translation_t5() -> anyhow::Result<()> {
 
     let translation_config = TranslationConfig::new(
         ModelType::T5,
-        model_resource,
+        ModelResource::Torch(Box::new(model_resource)),
         config_resource,
         vocab_resource,
-        merges_resource,
+        None,
         source_languages,
         target_languages,
         Device::cuda_if_available(),
@@ -66,12 +65,14 @@ fn test_summarization_t5() -> anyhow::Result<()> {
     //    Set-up translation model
     let summarization_config = SummarizationConfig {
         model_type: ModelType::T5,
-        model_resource: Box::new(RemoteResource::from_pretrained(T5ModelResources::T5_SMALL)),
+        model_resource: ModelResource::Torch(Box::new(RemoteResource::from_pretrained(
+            T5ModelResources::T5_SMALL,
+        ))),
         config_resource: Box::new(RemoteResource::from_pretrained(T5ConfigResources::T5_SMALL)),
         vocab_resource: Box::new(RemoteResource::from_pretrained(T5VocabResources::T5_SMALL)),
-        merges_resource: Box::new(RemoteResource::from_pretrained(T5VocabResources::T5_SMALL)),
+        merges_resource: None,
         min_length: 30,
-        max_length: 200,
+        max_length: Some(200),
         early_stopping: true,
         num_beams: 4,
         length_penalty: 2.0,
@@ -101,7 +102,7 @@ on K2-18b lasts 33 Earth days. According to The Guardian, astronomers were optim
 telescope — scheduled for launch in 2021 — and the European Space Agency's 2028 ARIEL program, could reveal more \
 about exoplanets like K2-18b."];
 
-    let output = model.summarize(&input);
+    let output = model.summarize(&input)?;
 
     assert_eq! (
     output[0],

@@ -10,6 +10,7 @@ use rust_bert::Config;
 use rust_tokenizers::tokenizer::{BertTokenizer, MultiThreadedTokenizer, TruncationStrategy};
 use rust_tokenizers::vocab::Vocab;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use tch::{nn, no_grad, Device, Tensor};
 
 #[test]
@@ -35,7 +36,7 @@ fn mobilebert_masked_model() -> anyhow::Result<()> {
     let mut config = MobileBertConfig::from_file(config_path);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let mobilebert_model = MobileBertForMaskedLM::new(&vs.root(), &config);
+    let mobilebert_model = MobileBertForMaskedLM::new(vs.root(), &config);
     vs.load(weights_path)?;
 
     //    Define input
@@ -56,7 +57,7 @@ fn mobilebert_masked_model() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -73,12 +74,12 @@ fn mobilebert_masked_model() -> anyhow::Result<()> {
         .logits
         .get(0)
         .get(4)
-        .double_value(&[i64::from(&index_1)]);
+        .double_value(&[i64::try_from(&index_1)?]);
     let score_2 = model_output
         .logits
         .get(1)
         .get(7)
-        .double_value(&[i64::from(&index_2)]);
+        .double_value(&[i64::try_from(&index_2)?]);
 
     assert_eq!("thing", word_1); // Outputs "person" : "Looks like one [person] is missing"
     assert_eq!("sunny", word_2); // Outputs "sunny" : "It was a very nice and [sunny] day"
@@ -130,7 +131,7 @@ fn mobilebert_for_sequence_classification() -> anyhow::Result<()> {
     dummy_label_mapping.insert(1, String::from("Negative"));
     dummy_label_mapping.insert(3, String::from("Neutral"));
     config.id2label = Some(dummy_label_mapping);
-    let model = MobileBertForSequenceClassification::new(&vs.root(), &config);
+    let model = MobileBertForSequenceClassification::new(vs.root(), &config)?;
 
     //    Define input
     let input = ["Very positive sentence", "Second sentence input"];
@@ -147,7 +148,7 @@ fn mobilebert_for_sequence_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -176,7 +177,7 @@ fn mobilebert_for_multiple_choice() -> anyhow::Result<()> {
     let vs = nn::VarStore::new(device);
     let tokenizer = BertTokenizer::from_file(vocab_path.to_str().unwrap(), true, true)?;
     let config = MobileBertConfig::from_file(config_path);
-    let model = MobileBertForMultipleChoice::new(&vs.root(), &config);
+    let model = MobileBertForMultipleChoice::new(vs.root(), &config);
 
     //    Define input
     let prompt = "In Italy, pizza served in formal settings, such as at a restaurant, is presented unsliced.";
@@ -202,7 +203,7 @@ fn mobilebert_for_multiple_choice() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0)
         .to(device)
@@ -240,7 +241,7 @@ fn mobilebert_for_token_classification() -> anyhow::Result<()> {
     dummy_label_mapping.insert(2, String::from("PER"));
     dummy_label_mapping.insert(3, String::from("ORG"));
     config.id2label = Some(dummy_label_mapping);
-    let model = MobileBertForTokenClassification::new(&vs.root(), &config);
+    let model = MobileBertForTokenClassification::new(vs.root(), &config)?;
 
     //    Define input
     let inputs = ["Where's Paris?", "In Kentucky, United States"];
@@ -257,7 +258,7 @@ fn mobilebert_for_token_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -287,7 +288,7 @@ fn mobilebert_for_question_answering() -> anyhow::Result<()> {
     let vs = nn::VarStore::new(device);
     let tokenizer = BertTokenizer::from_file(vocab_path.to_str().unwrap(), true, true)?;
     let config = MobileBertConfig::from_file(config_path);
-    let model = MobileBertForQuestionAnswering::new(&vs.root(), &config);
+    let model = MobileBertForQuestionAnswering::new(vs.root(), &config);
 
     //    Define input
     let inputs = ["Where's Paris?", "Paris is in In Kentucky, United States"];
@@ -309,7 +310,7 @@ fn mobilebert_for_question_answering() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 

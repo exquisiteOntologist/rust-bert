@@ -66,14 +66,12 @@
 //! # ;
 //! ```
 
-use rust_tokenizers::tokenizer::Tokenizer;
-use rust_tokenizers::vocab::Vocab;
 use tch::kind::Kind::Int64;
-use tch::{no_grad, Device, Tensor};
+use tch::{no_grad, Device, Kind, Tensor};
 
 use crate::bart::LayerState as BartLayerState;
-use crate::common::error::RustBertError;
 use crate::common::resources::ResourceProvider;
+use crate::gpt_j::LayerState as GPTJLayerState;
 use crate::gpt_neo::LayerState as GPTNeoLayerState;
 use crate::pipelines::generation_utils::private_generation_utils::{
     InternalGenerateOptions, PrivateLanguageGenerator,
@@ -84,30 +82,34 @@ use crate::t5::LayerState as T5LayerState;
 use crate::xlnet::LayerState as XLNetLayerState;
 
 use self::ordered_float::OrderedFloat;
-use crate::pipelines::common::TokenizerOption;
+use crate::pipelines::common::{ModelResource, ModelType, TokenizerOption};
 
+extern crate ordered_float;
+#[cfg(feature = "onnx")]
+use crate::pipelines::onnx::ONNXLayerCache;
+use crate::RustBertError;
 #[cfg(feature = "remote")]
 use crate::{
     gpt2::{Gpt2ConfigResources, Gpt2MergesResources, Gpt2ModelResources, Gpt2VocabResources},
     resources::RemoteResource,
 };
 
-extern crate ordered_float;
-
 /// # Configuration for text generation
 pub struct GenerateConfig {
+    /// Model type used for generation
+    pub model_type: ModelType,
     /// Model weights resource (default: pretrained GPT2 model)
-    pub model_resource: Box<dyn ResourceProvider + Send>,
+    pub model_resource: ModelResource,
     /// Config resource (default: pretrained GPT2 model)
     pub config_resource: Box<dyn ResourceProvider + Send>,
     /// Vocab resource (default: pretrained GPT2 model)
     pub vocab_resource: Box<dyn ResourceProvider + Send>,
     /// Merges resource (default: pretrained GPT2 model)
-    pub merges_resource: Box<dyn ResourceProvider + Send>,
+    pub merges_resource: Option<Box<dyn ResourceProvider + Send>>,
     /// Minimum sequence length (default: 0)
     pub min_length: i64,
     /// Maximum sequence length (default: 20)
-    pub max_length: i64,
+    pub max_length: Option<i64>,
     /// Sampling flag. If true, will perform top-k and/or nucleus sampling on generated tokens, otherwise greedy (deterministic) decoding (default: true)
     pub do_sample: bool,
     /// Early stopping flag indicating if the beam search should stop as soon as `num_beam` hypotheses have been generated (default: false)
@@ -134,18 +136,25 @@ pub struct GenerateConfig {
     pub diversity_penalty: Option<f64>,
     /// Device to place the model on (default: CUDA/GPU when available)
     pub device: Device,
+    /// Model weights precision. If not provided, will default to full precision on CPU, or the loaded weights precision otherwise
+    pub kind: Option<Kind>,
 }
 
 #[cfg(feature = "remote")]
 impl Default for GenerateConfig {
     fn default() -> GenerateConfig {
         GenerateConfig {
-            model_resource: Box::new(RemoteResource::from_pretrained(Gpt2ModelResources::GPT2)),
+            model_type: ModelType::GPT2,
+            model_resource: ModelResource::Torch(Box::new(RemoteResource::from_pretrained(
+                Gpt2ModelResources::GPT2,
+            ))),
             config_resource: Box::new(RemoteResource::from_pretrained(Gpt2ConfigResources::GPT2)),
             vocab_resource: Box::new(RemoteResource::from_pretrained(Gpt2VocabResources::GPT2)),
-            merges_resource: Box::new(RemoteResource::from_pretrained(Gpt2MergesResources::GPT2)),
+            merges_resource: Some(Box::new(RemoteResource::from_pretrained(
+                Gpt2MergesResources::GPT2,
+            ))),
             min_length: 0,
-            max_length: 20,
+            max_length: Some(56),
             do_sample: true,
             early_stopping: true,
             num_beams: 5,
@@ -159,6 +168,7 @@ impl Default for GenerateConfig {
             num_beam_groups: None,
             diversity_penalty: None,
             device: Device::cuda_if_available(),
+            kind: None,
         }
     }
 }
@@ -217,33 +227,39 @@ pub enum Cache {
     GPT2Cache(Option<Vec<Tensor>>),
     BARTCache(Option<Vec<(Option<BartLayerState>, Option<BartLayerState>)>>),
     T5Cache(Option<Vec<(Option<T5LayerState>, Option<T5LayerState>)>>),
+    LongT5Cache(Option<Vec<(Option<T5LayerState>, Option<T5LayerState>)>>),
     XLNetCache(Option<Vec<Option<XLNetLayerState>>>),
     ReformerCache(Option<Vec<Option<ReformerLayerState>>>),
     ProphetNetCache(Option<Vec<(Option<ProphetNetLayerState>, Option<ProphetNetLayerState>)>>),
     GPTNeoCache(Option<Vec<Option<GPTNeoLayerState>>>),
+    GPTJCache(Option<Vec<Option<GPTJLayerState>>>),
+    #[cfg(feature = "onnx")]
+    ONNXCache(ONNXLayerCache),
     None,
 }
 
 pub(crate) mod private_generation_utils {
+    use rust_tokenizers::TokenIdsWithOffsets;
     use std::cmp::{max, min};
     use std::collections::HashMap;
+    use std::convert::TryFrom;
     use std::mem;
 
-    use rust_tokenizers::tokenizer::{truncate_sequences, Tokenizer, TruncationStrategy};
-    use rust_tokenizers::vocab::Vocab;
-    use rust_tokenizers::TokenIdsWithOffsets;
-    use tch::kind::Kind::{Bool, Float, Int64};
+    use rust_tokenizers::tokenizer::{truncate_sequences, TruncationStrategy};
     use tch::{nn, Device, Kind, Tensor};
 
     use crate::pipelines::common::TokenizerOption;
-    use crate::pipelines::generation_utils::{BeamHypotheses, Cache, GenerateConfig, LMHeadModel};
+    use crate::pipelines::generation_utils::{
+        BeamHypotheses, Cache, GenerateConfig, LMModelOutput, PrefixAllowedFunction,
+    };
 
     use super::ordered_float::OrderedFloat;
-    use crate::common::kind::get_positive_infinity;
+    use crate::common::kind::{get_negative_infinity, get_positive_infinity};
+    use crate::RustBertError;
 
     pub struct InternalGenerateOptions<'a> {
         pub min_length: i64,
-        pub max_length: i64,
+        pub max_length: Option<i64>,
         pub do_sample: bool,
         pub temperature: f64,
         pub top_k: i64,
@@ -277,27 +293,67 @@ pub(crate) mod private_generation_utils {
         pub token_scores: Option<Vec<Vec<f64>>>,
     }
 
-    pub trait PrivateLanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>> {
-        fn get_model(&self) -> &T;
+    pub trait PrivateLanguageGenerator {
         fn _get_tokenizer(&self) -> &TokenizerOption;
-        fn get_var_store(&self) -> &nn::VarStore;
-        fn get_var_store_mut(&mut self) -> &mut nn::VarStore;
+        fn get_device(&self) -> Device;
+        fn get_var_store_mut(&mut self) -> Result<&mut nn::VarStore, RustBertError>;
+        fn _get_tokenizer_mut(&mut self) -> &mut TokenizerOption;
         fn get_config(&self) -> &GenerateConfig;
         fn get_bos_id(&self) -> Option<i64>;
         fn get_eos_ids(&self) -> Option<&Vec<i64>>;
+        fn get_forced_bos_token_id(&self) -> Option<i64> {
+            None
+        }
+        fn get_forced_eos_token_id(&self) -> Option<i64> {
+            None
+        }
         fn get_pad_id(&self) -> Option<i64>;
         fn is_encoder_decoder(&self) -> bool;
         fn get_vocab_size(&self) -> i64;
         fn get_decoder_start_id(&self) -> Option<i64>;
-        fn get_max_positions_embeddings(&self) -> i64;
+        fn get_max_positions_embeddings(&self) -> Option<i64>;
+
+        fn forward_t(
+            &self,
+            input_ids: Option<&Tensor>,
+            layer_past: Cache,
+            attention_mask: Option<&Tensor>,
+            token_type_ids: Option<&Tensor>,
+            position_ids: Option<&Tensor>,
+            input_embeds: Option<&Tensor>,
+            encoder_outputs: Option<&Tensor>,
+            decoder_input_ids: Option<&Tensor>,
+            train: bool,
+        ) -> Result<LMModelOutput, RustBertError>;
 
         fn prepare_scores_for_generation(
             &self,
-            _scores: &mut Tensor,
-            _current_length: i64,
-            _max_length: i64,
-            _forced_bos_token_id: Option<i64>,
+            scores: &mut Tensor,
+            current_length: i64,
+            max_length: Option<i64>,
+            forced_bos_token_id: Option<i64>,
         ) {
+            if current_length == 1 {
+                if let Some(forced_bos_token_id) =
+                    forced_bos_token_id.or(self.get_forced_bos_token_id())
+                {
+                    force_token_id_generation(
+                        scores,
+                        &[forced_bos_token_id],
+                        self.get_vocab_size(),
+                    );
+                }
+            } else if let Some(max_length) = max_length {
+                if let Some(forced_eos_token_id) = self.get_forced_eos_token_id() {
+                    if current_length == max_length - 1 {
+                        force_token_id_generation(
+                            scores,
+                            &[forced_eos_token_id],
+                            self.get_vocab_size(),
+                        );
+                    }
+                }
+            }
         }
 
         fn encode(&self, _input_ids: &Tensor, _attention_mask: Option<&Tensor>) -> Option<Tensor> {
@@ -324,50 +380,72 @@ pub(crate) mod private_generation_utils {
         fn encode_prompt_text<S>(
             &self,
             prompt_text: &[S],
-            max_len: i64,
+            max_len: Option<i64>,
             pad_token_id: Option<i64>,
         ) -> Tensor
         where
-            S: AsRef<str> + Sync,
+            S: AsRef<str> + Send + Sync,
         {
-            let tokens = self._get_tokenizer().tokenize_list(prompt_text);
-            let token_ids = tokens
-                .into_iter()
-                .map(|prompt_tokens| self._get_tokenizer().convert_tokens_to_ids(&prompt_tokens))
-                .collect::<Vec<Vec<i64>>>();
+            let token_ids = if self.is_encoder_decoder() {
+                let tokens = self._get_tokenizer().encode_list(
+                    prompt_text,
+                    max_len
+                        .map(|max_len| max_len as usize)
+                        .unwrap_or(usize::MAX),
+                    &TruncationStrategy::LongestFirst,
+                    0,
+                );
+                tokens
+                    .into_iter()
+                    .map(|tokenized_input| tokenized_input.token_ids)
+                    .collect::<Vec<Vec<i64>>>()
+            } else {
+                // Special tokens (e.g. BOS) are not added at the end of the prompt for causal generation
+                let tokens = self._get_tokenizer().tokenize_list(prompt_text);
+                let token_ids = tokens
+                    .into_iter()
+                    .map(|prompt_tokens| {
+                        self._get_tokenizer().convert_tokens_to_ids(&prompt_tokens)
+                    })
+                    .collect::<Vec<Vec<i64>>>();
 
-            let num_truncated_tokens = token_ids
-                .iter()
-                .map(|token_ids| {
-                    if token_ids.len() > max_len as usize {
-                        token_ids.len() - max_len as usize
-                    } else {
-                        0
-                    }
-                })
-                .collect::<Vec<usize>>();
+                let num_truncated_tokens = token_ids
+                    .iter()
+                    .map(|token_ids| {
+                        max_len
+                            .map(|max_len| {
+                                if token_ids.len() > max_len as usize {
+                                    token_ids.len() - max_len as usize
+                                } else {
+                                    0
+                                }
+                            })
+                            .unwrap_or(0)
+                    })
+                    .collect::<Vec<usize>>();
 
-            let token_ids = token_ids
-                .into_iter()
-                .zip(num_truncated_tokens)
-                .map(|(tokens, num_truncated_tokens)| {
-                    truncate_sequences(
-                        TokenIdsWithOffsets {
-                            ids: tokens,
-                            offsets: vec![],
-                            reference_offsets: vec![],
-                            masks: vec![],
-                        },
-                        None,
-                        num_truncated_tokens,
-                        &TruncationStrategy::LongestFirst,
-                        0,
-                    )
-                    .unwrap()
-                    .0
-                    .ids
-                })
-                .collect::<Vec<Vec<i64>>>();
+                token_ids
+                    .into_iter()
+                    .zip(num_truncated_tokens)
+                    .map(|(tokens, num_truncated_tokens)| {
+                        truncate_sequences(
+                            TokenIdsWithOffsets {
+                                ids: tokens,
+                                offsets: vec![],
+                                reference_offsets: vec![],
+                                masks: vec![],
+                            },
+                            None,
+                            num_truncated_tokens,
+                            &TruncationStrategy::LongestFirst,
+                            0,
+                        )
+                        .unwrap()
+                        .0
+                        .ids
+                    })
+                    .collect::<Vec<Vec<i64>>>()
+            };
 
             let max_len = token_ids.iter().map(|input| input.len()).max().unwrap();
 
@@ -378,13 +456,20 @@ pub(crate) mod private_generation_utils {
 
             let token_ids = token_ids
                 .into_iter()
-                .map(|input| {
+                .map(|mut input| {
                     let mut temp = vec![pad_token; max_len - input.len()];
-                    temp.extend(input);
-                    temp
+                    if self.is_encoder_decoder() {
+                        input.extend(temp);
+                        input
+                    } else {
+                        // Pad left for causal generation
+                        temp.extend(input);
+                        temp
+                    }
                 })
-                .map(|tokens| Tensor::of_slice(&tokens).to(self.get_var_store().device()))
+                .map(|tokens| Tensor::from_slice(&tokens).to(self.get_device()))
                 .collect::<Vec<Tensor>>();
+
             Tensor::stack(&token_ids, 0)
         }
 
@@ -396,23 +481,23 @@ pub(crate) mod private_generation_utils {
             prev_output_tokens: &Tensor,
             repetition_penalty: f64,
         ) {
-            for i in 0..(batch_size * num_beams as i64) {
+            for i in 0..(batch_size * num_beams) {
                 for token_position in 0..prev_output_tokens.get(i).size()[0] {
                     let token = prev_output_tokens.get(i).int64_value(&[token_position]);
                     let updated_value = &next_token_logits.double_value(&[i, token]);
                     if updated_value < &0f64 {
                         let _ = next_token_logits.get(i).index_fill_(
                             0,
-                            &Tensor::of_slice(&[token])
-                                .to_kind(Int64)
+                            &Tensor::from_slice(&[token])
+                                .to_kind(Kind::Int64)
                                 .to_device(next_token_logits.device()),
                             updated_value * repetition_penalty,
                         );
                     } else {
                         let _ = next_token_logits.get(i).index_fill_(
                             0,
-                            &Tensor::of_slice(&[token])
-                                .to_kind(Int64)
+                            &Tensor::from_slice(&[token])
+                                .to_kind(Kind::Int64)
                                 .to_device(next_token_logits.device()),
                             updated_value / repetition_penalty,
                         );
@@ -494,31 +579,35 @@ pub(crate) mod private_generation_utils {
                     .softmax(-1, sorted_logits.kind())
                     .cumsum(-1, sorted_logits.kind());
                 let mut sorted_indices_to_remove =
-                    cumulative_probabilities.ge(top_p).to_kind(Int64);
+                    cumulative_probabilities.ge(top_p).to_kind(Kind::Int64);
                 if min_tokens_to_keep > 1 {
                     let _ = sorted_indices_to_remove.index_fill_(
                         1,
-                        &Tensor::arange_start(0, min_tokens_to_keep + 1, (Int64, logits.device())),
+                        &Tensor::arange_start(
+                            0,
+                            min_tokens_to_keep + 1,
+                            (Kind::Int64, logits.device()),
+                        ),
                         0,
                     );
                 }
                 let _ = sorted_indices_to_remove.index_copy_(
                     1,
-                    &Tensor::arange_start(1, vocab_size, (Int64, logits.device())),
+                    &Tensor::arange_start(1, vocab_size, (Kind::Int64, logits.device())),
                     &sorted_indices_to_remove
                         .slice(1, 0, vocab_size - 1, 1)
                         .copy(),
                 );
                 let _ = sorted_indices_to_remove.index_fill_(
                     1,
-                    &Tensor::of_slice(&[0])
-                        .to_kind(Int64)
+                    &Tensor::from_slice(&[0])
+                        .to_kind(Kind::Int64)
                         .to_device(sorted_indices_to_remove.device()),
                     0,
                 );
                 let indices_to_remove = sorted_indices_to_remove
                     .scatter(1, &sorted_indices, &sorted_indices_to_remove)
-                    .to_kind(Bool);
+                    .to_kind(Kind::Bool);
                 let _ = logits.masked_fill_(&indices_to_remove, f64::NEG_INFINITY);
             }
         }
@@ -575,7 +664,7 @@ pub(crate) mod private_generation_utils {
                     prefix_allowed_tokens_fn(batch_id, &input_ids.get(idx));
                 let _ = mask.get(idx).index_fill_(
                     0,
-                    &Tensor::of_slice(allowed_tokens.as_slice()).to(scores.device()),
+                    &Tensor::from_slice(allowed_tokens.as_slice()).to(scores.device()),
                     0,
                 );
             }
@@ -629,10 +718,10 @@ pub(crate) mod private_generation_utils {
             bad_words_id_length_1: &[i64],
         ) -> Tensor {
             let mut static_bad_words_mask =
-                Tensor::zeros(&[scores.size()[1]], (Kind::Int8, scores.device()));
+                Tensor::zeros([scores.size()[1]], (Kind::Int8, scores.device()));
             let _ = static_bad_words_mask.index_fill_(
                 0,
-                &Tensor::of_slice(bad_words_id_length_1).to_device(scores.device()),
+                &Tensor::from_slice(bad_words_id_length_1).to_device(scores.device()),
                 1,
             );
             static_bad_words_mask.unsqueeze(0).totype(Kind::Bool)
@@ -695,7 +784,7 @@ pub(crate) mod private_generation_utils {
                     if !sequence_ban_tokens.is_empty() {
                         let _ = dynamic_banned_mask.get(sequence_index as i64).index_fill_(
                             0,
-                            &Tensor::of_slice(sequence_ban_tokens).to_device(scores.device()),
+                            &Tensor::from_slice(sequence_ban_tokens).to_device(scores.device()),
                             1,
                         );
                     }
@@ -738,14 +827,13 @@ pub(crate) mod private_generation_utils {
             batch_size: i64,
             attention_mask: Tensor,
             gen_opt: InternalGenerateOptions,
-            prefix_allowed_tokens_fn: Option<&dyn Fn(i64, &Tensor) -> Vec<i64>>,
+            prefix_allowed_tokens_fn: Option<PrefixAllowedFunction>,
             output_scores: bool,
         ) -> GeneratedOutputWithScores {
             let mut unfinished_sentences =
-                Tensor::ones(&[batch_size], (Int64, self.get_var_store().device()));
+                Tensor::ones([batch_size], (Kind::Int64, self.get_device()));
             let mut sentence_lengths: Tensor =
-                Tensor::ones(&[batch_size], (Int64, self.get_var_store().device()))
-                    * gen_opt.max_length as i64;
+                Tensor::ones([batch_size], (Kind::Int64, self.get_device()));
             let (bad_word_ids_length_1, bad_word_ids_length_greater_than_1) =
                 self.split_bad_word_ids(gen_opt.bad_word_ids);
             let mut static_bad_words_mask: Option<Tensor> = None;
@@ -757,7 +845,7 @@ pub(crate) mod private_generation_utils {
             let mut token_scores_output: Option<Vec<Tensor>> =
                 if output_scores { Some(vec![]) } else { None };
 
-            while current_length < gen_opt.max_length {
+            loop {
                 let prepared_input = self.prepare_inputs_for_generation(
                     input_ids.copy(),
                     encoder_outputs.as_ref(),
@@ -765,7 +853,6 @@ pub(crate) mod private_generation_utils {
                     attention_mask.copy(),
                 );
                 let temp = self
-                    .get_model()
                     .forward_t(
                         prepared_input.prepared_input.as_ref(),
                         prepared_input.prepared_past,
@@ -816,15 +903,15 @@ pub(crate) mod private_generation_utils {
                 if gen_opt.no_repeat_ngram_size > 0 {
                     let banned_tokens = self.get_banned_tokens(
                         &input_ids,
-                        gen_opt.no_repeat_ngram_size as i64,
-                        current_length as i64,
+                        gen_opt.no_repeat_ngram_size,
+                        current_length,
                     );
                     for (batch_index, index_banned_token) in
                         (0..banned_tokens.len() as i64).zip(banned_tokens)
                     {
                         let _ = next_token_logits.get(batch_index).index_fill_(
                             0,
-                            &Tensor::of_slice(&index_banned_token)
+                            &Tensor::from_slice(&index_banned_token)
                                 .to_device(next_token_logits.device()),
                             f64::NEG_INFINITY,
                         );
@@ -845,7 +932,7 @@ pub(crate) mod private_generation_utils {
                 if (gen_opt.eos_token_ids.is_some()) & (current_length < gen_opt.min_length) {
                     let _ = next_token_logits.index_fill_(
                         1,
-                        &Tensor::of_slice(gen_opt.eos_token_ids.as_ref().unwrap())
+                        &Tensor::from_slice(gen_opt.eos_token_ids.as_ref().unwrap())
                             .to(next_token_logits.device()),
                         f64::NEG_INFINITY,
                     );
@@ -865,7 +952,7 @@ pub(crate) mod private_generation_utils {
                     }
                     self.top_k_top_p_filtering(
                         &mut next_token_logits,
-                        gen_opt.top_k as i64,
+                        gen_opt.top_k,
                         gen_opt.top_p,
                         1,
                     );
@@ -880,7 +967,7 @@ pub(crate) mod private_generation_utils {
                     prev_scores.push(
                         next_token_logits
                             .log_softmax(-1, next_token_logits.kind())
-                            .gather(1, &next_token.reshape(&[-1, 1]), true)
+                            .gather(1, &next_token.reshape([-1, 1]), false)
                             .squeeze()
                             .masked_fill(&finished_mask, 0),
                     );
@@ -898,17 +985,18 @@ pub(crate) mod private_generation_utils {
                 input_ids = Tensor::cat(&[input_ids, tokens_to_add.unsqueeze(-1)], -1);
                 if gen_opt.eos_token_ids.is_some() {
                     for eos_token_id in gen_opt.eos_token_ids.as_ref().unwrap() {
-                        let sentence_with_eos = tokens_to_add.eq(*eos_token_id).to_kind(Int64);
+                        let sentence_with_eos =
+                            tokens_to_add.eq(*eos_token_id).to_kind(Kind::Int64);
                         let sentence_with_eos: Tensor = sentence_with_eos * &unfinished_sentences;
                         let _ = sentence_lengths.masked_fill_(
                             &sentence_with_eos
-                                .to_kind(Bool)
+                                .to_kind(Kind::Bool)
                                 .to_device(sentence_lengths.device()),
-                            current_length as i64 + 1,
+                            current_length + 1,
                         );
                         unfinished_sentences = -unfinished_sentences * (sentence_with_eos - 1);
                     }
-                    if i64::from(unfinished_sentences.max()) == 0 {
+                    if i64::try_from(unfinished_sentences.max()).unwrap() == 0 {
                         break;
                     }
                 }
@@ -917,8 +1005,8 @@ pub(crate) mod private_generation_utils {
                         &[
                             attention_mask.as_ref(),
                             Tensor::ones(
-                                &[*attention_mask.size().first().unwrap(), 1],
-                                (Int64, attention_mask.device()),
+                                [*attention_mask.size().first().unwrap(), 1],
+                                (Kind::Int64, attention_mask.device()),
                             )
                             .as_ref(),
                         ],
@@ -926,10 +1014,24 @@ pub(crate) mod private_generation_utils {
                     );
                 }
                 current_length += 1;
+                if let Some(max_length) = gen_opt.max_length {
+                    if current_length >= max_length {
+                        let _ = sentence_lengths.masked_fill_(
+                            &unfinished_sentences
+                                .to_kind(Kind::Bool)
+                                .to_device(sentence_lengths.device()),
+                            current_length,
+                        );
+                        break;
+                    }
+                }
             }
             let scores_output = token_scores_output.as_ref().map(|scores_tensor| {
-                (Tensor::stack(scores_tensor, 1).sum_dim_intlist(&[1], false, Kind::Float)
-                    / sentence_lengths.pow_tensor_scalar(gen_opt.length_penalty))
+                (Tensor::stack(scores_tensor, 1).sum_dim_intlist(
+                    [1].as_slice(),
+                    false,
+                    Kind::Float,
+                ) / sentence_lengths.pow_tensor_scalar(gen_opt.length_penalty))
                 .iter::<f64>()
                 .unwrap()
                 .collect::<Vec<f64>>()
@@ -962,7 +1064,7 @@ pub(crate) mod private_generation_utils {
             batch_size: i64,
             mut attention_mask: Tensor,
             gen_opt: InternalGenerateOptions,
-            prefix_allowed_tokens_fn: Option<&dyn Fn(i64, &Tensor) -> Vec<i64>>,
+            prefix_allowed_tokens_fn: Option<PrefixAllowedFunction>,
             output_scores: bool,
         ) -> GeneratedOutputWithScores {
             let num_beam_groups = gen_opt.num_beam_groups.unwrap_or(1);
@@ -985,21 +1087,21 @@ pub(crate) mod private_generation_utils {
 
             let vocab_size = self.get_vocab_size();
             let beam_scores = Tensor::ones(
-                &[batch_size, gen_opt.num_beams],
-                (Float, self.get_var_store().device()),
+                [batch_size, gen_opt.num_beams],
+                (Kind::Float, self.get_device()),
             ) * -1e9;
             let _ = beam_scores
                 .slice(1, 0, *beam_scores.size().last().unwrap(), num_sub_beams)
                 .fill_(0);
 
-            let mut beam_scores = beam_scores.view_(&[-1]);
+            let mut beam_scores = beam_scores.view_([-1]);
             let mut beam_tokens = Tensor::zeros(
-                &[batch_size * gen_opt.num_beams],
-                (Int64, self.get_var_store().device()),
+                [batch_size * gen_opt.num_beams],
+                (Kind::Int64, self.get_device()),
             );
             let mut beam_indices = Tensor::zeros(
-                &[batch_size * gen_opt.num_beams],
-                (Int64, self.get_var_store().device()),
+                [batch_size * gen_opt.num_beams],
+                (Kind::Int64, self.get_device()),
             );
             let mut saved_beam_scores: Option<Vec<Tensor>> =
                 if output_scores { Some(vec![]) } else { None };
@@ -1012,10 +1114,10 @@ pub(crate) mod private_generation_utils {
             let mut encoder_outputs = encoder_outputs;
             let mut current_length = cur_len;
 
-            while current_length < gen_opt.max_length {
+            loop {
                 if num_beam_groups > 1 {
                     current_tokens = Tensor::zeros(
-                        &[batch_size * gen_opt.num_beams],
+                        [batch_size * gen_opt.num_beams],
                         (input_ids.kind(), input_ids.device()),
                     );
                 }
@@ -1026,7 +1128,6 @@ pub(crate) mod private_generation_utils {
                     attention_mask.copy(),
                 );
                 let temp = self
-                    .get_model()
                     .forward_t(
                         prepared_input.prepared_input.as_ref(),
                         prepared_input.prepared_past,
@@ -1057,7 +1158,8 @@ pub(crate) mod private_generation_utils {
                             )
                         }
                         let batch_group_indices =
-                            Tensor::of_slice(batch_group_indices.as_slice()).to(input_ids.device());
+                            Tensor::from_slice(batch_group_indices.as_slice())
+                                .to(input_ids.device());
                         (
                             Some(input_ids.index_select(0, &batch_group_indices)),
                             Some(batch_group_indices),
@@ -1100,7 +1202,7 @@ pub(crate) mod private_generation_utils {
                     if (gen_opt.eos_token_ids.is_some()) & (current_length < gen_opt.min_length) {
                         let _ = scores.index_fill_(
                             1,
-                            &Tensor::of_slice(gen_opt.eos_token_ids.as_ref().unwrap())
+                            &Tensor::from_slice(gen_opt.eos_token_ids.as_ref().unwrap())
                                 .to(scores.device()),
                             f64::NEG_INFINITY,
                         );
@@ -1136,7 +1238,7 @@ pub(crate) mod private_generation_utils {
                         {
                             let _ = scores.get(batch_index).index_fill_(
                                 0,
-                                &Tensor::of_slice(&index_banned_token)
+                                &Tensor::from_slice(&index_banned_token)
                                     .to_device(next_token_logits.device()),
                                 f64::NEG_INFINITY,
                             );
@@ -1202,19 +1304,19 @@ pub(crate) mod private_generation_utils {
 
                     let eos_token_ids = gen_opt.eos_token_ids.as_ref();
                     let beam_ids_tensor = &next_tokens.divide_scalar_mode(vocab_size, "floor");
-                    let effective_beam_ids_tensor = (&next_tokens.ones_like().cumsum(0, Int64) - 1)
-                        * group_size
-                        + beam_ids_tensor;
+                    let effective_beam_ids_tensor =
+                        (&next_tokens.ones_like().cumsum(0, Kind::Int64) - 1) * group_size
+                            + beam_ids_tensor;
                     let token_id_tensor = &next_tokens - beam_ids_tensor * vocab_size;
                     let (max_scores, _) = next_scores.max_dim(1, false);
                     let mut eos_mask = token_id_tensor.ones_like();
                     if let Some(eos_token_id) = eos_token_ids {
-                        eos_mask -= token_id_tensor.eq(eos_token_id[0]).to_kind(Int64);
+                        eos_mask -= token_id_tensor.eq(eos_token_id[0]).to_kind(Kind::Int64);
                     }
                     let eos_mask2 = eos_mask
-                        .cumsum(1, Int64)
+                        .cumsum(1, Kind::Int64)
                         .le(group_size)
-                        .to_kind(Bool)
+                        .to_kind(Kind::Bool)
                         .logical_and(&eos_mask);
 
                     let group_beam_scores = next_scores.masked_select(&eos_mask2);
@@ -1314,6 +1416,13 @@ pub(crate) mod private_generation_utils {
                     ],
                     -1,
                 );
+
+                current_length += 1;
+                if let Some(max_length) = gen_opt.max_length {
+                    if current_length >= max_length {
+                        break;
+                    }
+                }
                 encoder_outputs = self.reorder_cache(&mut past, encoder_outputs, &beam_indices);
 
                 if !self.is_encoder_decoder() {
@@ -1321,16 +1430,14 @@ pub(crate) mod private_generation_utils {
                         &[
                             attention_mask.as_ref(),
                             Tensor::ones(
-                                &[*attention_mask.size().first().unwrap(), 1],
-                                (Int64, attention_mask.device()),
+                                [*attention_mask.size().first().unwrap(), 1],
+                                (Kind::Int64, attention_mask.device()),
                             )
                             .as_ref(),
                         ],
                         -1,
                     );
                 }
-
-                current_length += 1;
             }
 
             let mut batch_index = 0i64;
@@ -1350,7 +1457,7 @@ pub(crate) mod private_generation_utils {
                     let beam_saved_token_scores = saved_beam_scores.as_mut().map(|saved_tokens| {
                         mem::replace(&mut saved_tokens[effective_beam_id as usize], Tensor::new())
                     });
-                    let final_score = f64::from(beam_scores.get(effective_beam_id));
+                    let final_score = f64::try_from(beam_scores.get(effective_beam_id)).unwrap();
                     let final_tokens = input_ids.get(effective_beam_id);
                     hypotheses[batch_index as usize].add(
                         final_tokens,
@@ -1370,7 +1477,7 @@ pub(crate) mod private_generation_utils {
             };
 
             let mut sentence_lengths =
-                Tensor::zeros(&[output_batch_size], (Int64, input_ids.device()));
+                Tensor::zeros([output_batch_size], (Kind::Int64, input_ids.device()));
             let mut best_ids = vec![];
 
             let mut scores_output = if output_scores {
@@ -1396,7 +1503,7 @@ pub(crate) mod private_generation_utils {
                         sorted_hypotheses.beams.pop().unwrap();
                     let _ = sentence_lengths.index_fill_(
                         0,
-                        &Tensor::of_slice(&[effective_batch_index]).to(sentence_lengths.device()),
+                        &Tensor::from_slice(&[effective_batch_index]).to(sentence_lengths.device()),
                         *best_hyp.size().first().unwrap(),
                     );
                     best_ids.push(best_hyp);
@@ -1414,13 +1521,23 @@ pub(crate) mod private_generation_utils {
                     }
                 }
             }
-            let sentence_max_length =
-                min(i64::from(sentence_lengths.max()) + 1, gen_opt.max_length);
+            let sentence_max_length = gen_opt
+                .max_length
+                .map(|max_length| {
+                    min(
+                        i64::try_from(sentence_lengths.max()).unwrap() + 1,
+                        max_length,
+                    )
+                })
+                .unwrap_or(i64::try_from(sentence_lengths.max()).unwrap() + 1);
+
             let mut decoded = input_ids.new_empty(
-                &[output_batch_size, sentence_max_length],
-                (Int64, input_ids.device()),
+                [output_batch_size, sentence_max_length],
+                (Kind::Int64, input_ids.device()),
             );
-            if i64::from(sentence_lengths.max()) != i64::from(sentence_lengths.min()) {
+            if i64::try_from(sentence_lengths.max()).unwrap()
+                != i64::try_from(sentence_lengths.min()).unwrap()
+            {
                 let _ = decoded.fill_(
                     gen_opt
                         .pad_token_id
@@ -1432,16 +1549,20 @@ pub(crate) mod private_generation_utils {
                     0,
                     &Tensor::arange_start(
                         0,
-                        i64::from(sentence_lengths.get(hypothesis_index as i64)),
-                        (Int64, input_ids.device()),
+                        i64::try_from(sentence_lengths.get(hypothesis_index as i64)).unwrap(),
+                        (Kind::Int64, input_ids.device()),
                     ),
                     best_id,
                 );
-                let sentence_length = i64::from(sentence_lengths.get(hypothesis_index as i64));
-                if sentence_length < gen_opt.max_length {
+                let sentence_length =
+                    i64::try_from(sentence_lengths.get(hypothesis_index as i64)).unwrap();
+                let sentence_length_max = gen_opt
+                    .max_length
+                    .unwrap_or_else(|| i64::try_from(sentence_lengths.max()).unwrap());
+                if sentence_length < sentence_length_max {
                     let _ = decoded.get(hypothesis_index as i64).index_fill_(
                         0,
-                        &Tensor::of_slice(&[sentence_length]).to_device(input_ids.device()),
+                        &Tensor::from_slice(&[sentence_length]).to_device(input_ids.device()),
                         gen_opt.eos_token_ids.as_ref().unwrap()[0],
                     );
                 }
@@ -1467,6 +1588,18 @@ pub(crate) mod private_generation_utils {
             }
         }
     }
+
+    pub fn force_token_id_generation(scores: &mut Tensor, token_ids: &[i64], vocab_size: i64) {
+        let impossible_tokens: Vec<i64> = (0..vocab_size)
+            .filter(|pos| !token_ids.contains(pos))
+            .collect();
+        let impossible_tokens = Tensor::from_slice(&impossible_tokens).to_device(scores.device());
+        let _ = scores.index_fill_(
+            1,
+            &impossible_tokens,
+            get_negative_infinity(scores.kind()).unwrap(),
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1485,6 +1618,12 @@ pub struct GeneratedIndicesOutput {
     pub score: Option<f64>,
     pub token_scores: Option<Vec<f64>>,
 }
+
+pub type PrefixAllowedFunction<'a> = &'a dyn Fn(i64, &Tensor) -> Vec<i64>;
+/// Type alias for a function defining allowed tokens based on current tokens generated.
+/// This function should take a `batch_id` and associated tensor of already generated tokens and
+/// should return a vector of allowed tokens. This is useful for controlled generation, i.e.
+/// deterministic generation of a token continuation if a sequence of token occurs.
 
 #[derive(Clone, Copy, Default)]
 /// # Generation options for text generation.
@@ -1528,7 +1667,7 @@ pub struct GenerateOptions<'a> {
     /// Forced first token generated
     pub forced_bos_token_id: Option<i64>,
     /// Function to control the generation process. The function should take a `batch_id` (i64) and a tensor of token_ids already generated and returns a `Vec<i64>` of allowed tokens.
-    pub prefix_allowed_tokens_fn: Option<&'a dyn Fn(i64, &Tensor) -> Vec<i64>>,
+    pub prefix_allowed_tokens_fn: Option<PrefixAllowedFunction<'a>>,
     /// List of bad word ids (may be a sequence of word ids) that will be banned during the generation
     pub bad_word_ids: Option<&'a Vec<Vec<i64>>>,
     /// Flag indicating if text generation scores should be returned
@@ -1545,9 +1684,7 @@ macro_rules! unpack_config {
 
 /// # Common trait for text generation models.
 /// Main API for text generation
-pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
-    PrivateLanguageGenerator<T, V, U>
-{
+pub trait LanguageGenerator: PrivateLanguageGenerator {
     /// Generate text based on a vector of promp texts.
     ///
     /// # Arguments
@@ -1578,7 +1715,7 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
     /// # let weights_path = &home.as_path().join("model.ot");
     /// let device = Device::cuda_if_available();
     /// let generate_config = GenerateConfig {
-    ///     max_length: 30,
+    ///     max_length: Some(30),
     ///     do_sample: true,
     ///     num_beams: 5,
     ///     temperature: 1.1,
@@ -1638,11 +1775,11 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
         &self,
         prompt_texts: Option<&[S]>,
         generate_options: Option<GenerateOptions>,
-    ) -> Vec<GeneratedTextOutput>
+    ) -> Result<Vec<GeneratedTextOutput>, RustBertError>
     where
-        S: AsRef<str> + Sync,
+        S: AsRef<str> + Send + Sync,
     {
-        let indices_outputs = self.generate_indices(prompt_texts, generate_options);
+        let indices_outputs = self.generate_indices(prompt_texts, generate_options)?;
         let mut output = Vec::with_capacity(indices_outputs.len());
         for generated_sequence in indices_outputs {
             output.push(GeneratedTextOutput {
@@ -1652,7 +1789,7 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
                 score: generated_sequence.score,
             });
         }
-        output
+        Ok(output)
     }
 
     /// Generate token indices without decoding (useful for token-level operations before returning final text or as validation step during training).
@@ -1685,7 +1822,7 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
     /// # let weights_path = &home.as_path().join("model.ot");
     /// let device = Device::cuda_if_available();
     /// let generate_config = GenerateConfig {
-    ///     max_length: 30,
+    ///     max_length: Some(30),
     ///     do_sample: true,
     ///     num_beams: 5,
     ///     temperature: 1.1,
@@ -1732,14 +1869,17 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
         &self,
         prompt_texts: Option<&[S]>,
         generate_options: Option<GenerateOptions>,
-    ) -> Vec<GeneratedIndicesOutput>
+    ) -> Result<Vec<GeneratedIndicesOutput>, RustBertError>
     where
-        S: AsRef<str> + Sync,
+        S: AsRef<str> + Send + Sync,
     {
         let eos_token_ids = self.get_eos_ids();
 
         let config = self.get_config();
-        let max_length = unpack_config!(max_length, generate_options, config);
+
+        let max_length = generate_options.map_or(config.max_length, |generate_options| {
+            generate_options.max_length
+        });
         let encoding_max_len = if self.is_encoder_decoder() {
             self.get_max_positions_embeddings()
         } else {
@@ -1755,14 +1895,13 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
                 self.encode_prompt_text(prompts, encoding_max_len, pad_token_id)
             }
             None => match self.get_bos_id() {
-                Some(bos_id) => {
-                    Tensor::ones(&[1, 1], (Int64, self.get_var_store().device())) * bos_id
-                }
-                None => panic!(
+                Some(bos_id) => Tensor::ones([1, 1], (Int64, self.get_device())) * bos_id,
+                None => return Err(RustBertError::ValueError(
                     "A model with a BOS token must be used to start generation with an empty input"
-                ),
+                        .to_string(),
+                )),
             },
-            _ => return Vec::new(),
+            _ => return Ok(Vec::new()),
         };
         self.generate_from_ids_and_past(input_ids, None, generate_options)
     }
@@ -1822,7 +1961,7 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
         mut input_ids: Tensor,
         mut attention_mask: Option<Tensor>,
         generate_options: Option<GenerateOptions>,
-    ) -> Vec<GeneratedIndicesOutput> {
+    ) -> Result<Vec<GeneratedIndicesOutput>, RustBertError> {
         let eos_token_ids = PrivateLanguageGenerator::get_eos_ids(self).cloned();
 
         let config = PrivateLanguageGenerator::get_config(self);
@@ -1862,13 +2001,13 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
         let mut input_ids_len = *input_id_size.last().unwrap();
         if input_ids_len == 0 {
             input_ids = Tensor::ones(
-                &[*input_id_size.first().unwrap(), 1],
+                [*input_id_size.first().unwrap(), 1],
                 (Int64, input_ids.device()),
             ) * self
                 .get_bos_id()
                 .expect("`bos_token_id` has to be defined when no `input_ids` are provided.");
             attention_mask = Some(Tensor::ones(
-                &[*input_id_size.first().unwrap(), 1],
+                [*input_id_size.first().unwrap(), 1],
                 (Int64, input_ids.device()),
             ));
             input_ids_len += 1;
@@ -1882,10 +2021,7 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
         let batch_size = *input_ids.size().first().unwrap();
 
         let (effective_batch_size, effective_batch_mult) = match do_sample {
-            true => (
-                batch_size * num_return_sequences as i64,
-                num_return_sequences as i64,
-            ),
+            true => (batch_size * num_return_sequences, num_return_sequences),
             false => (batch_size, 1),
         };
 
@@ -1898,10 +2034,12 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
         };
 
         let encoder_outputs = if self.is_encoder_decoder() {
-            let encoder_outputs = self.encode(&input_ids, Some(&attention_mask)).unwrap();
+            let encoder_outputs = self
+                .encode(&input_ids, Some(&attention_mask))
+                .ok_or(RustBertError::UnsupportedError)?;
             let expanded_batch_indices = Tensor::arange(batch_size, (Int64, input_ids.device()))
                 .view((-1, 1))
-                .repeat(&[1, num_beams as i64 * effective_batch_mult])
+                .repeat([1, num_beams * effective_batch_mult])
                 .view(-1);
             Some(encoder_outputs.index_select(0, &expanded_batch_indices))
         } else {
@@ -1914,30 +2052,31 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
                     input_ids
                         .unsqueeze(1)
                         .expand(
-                            &[batch_size, effective_batch_mult * num_beams as i64, cur_len],
+                            [batch_size, effective_batch_mult * num_beams, cur_len],
                             true,
                         )
                         .contiguous()
-                        .view((effective_batch_size * num_beams as i64, cur_len)),
+                        .view((effective_batch_size * num_beams, cur_len)),
                     attention_mask
                         .unsqueeze(1)
                         .expand(
-                            &[batch_size, effective_batch_mult * num_beams as i64, cur_len],
+                            [batch_size, effective_batch_mult * num_beams, cur_len],
                             true,
                         )
                         .contiguous()
-                        .view((effective_batch_size * num_beams as i64, cur_len)),
+                        .view((effective_batch_size * num_beams, cur_len)),
                 )
             } else {
                 (input_ids, attention_mask)
             }
         } else {
-            let decoder_start_token_id = decoder_start_token_id.unwrap_or_else(|| {
-                self.get_decoder_start_id()
-                    .expect("decoder start id must be specified for encoder decoders")
-            });
+            let decoder_start_token_id = decoder_start_token_id
+                .or(self.get_decoder_start_id())
+                .ok_or(RustBertError::ValueError(
+                    "decoder start id must be specified for encoder decoders".to_string(),
+                ))?;
             let input_ids = Tensor::full(
-                &[effective_batch_size * num_beams as i64, 1],
+                [effective_batch_size * num_beams, 1],
                 decoder_start_token_id,
                 (Int64, input_ids.device()),
             );
@@ -1945,15 +2084,11 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
                 attention_mask
                     .unsqueeze(1)
                     .expand(
-                        &[
-                            batch_size,
-                            effective_batch_mult * num_beams as i64,
-                            input_ids_len,
-                        ],
+                        [batch_size, effective_batch_mult * num_beams, input_ids_len],
                         true,
                     )
                     .contiguous()
-                    .view((effective_batch_size * num_beams as i64, input_ids_len))
+                    .view((effective_batch_size * num_beams, input_ids_len))
             } else {
                 attention_mask
             };
@@ -1962,13 +2097,27 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
 
         let max_length = if let Some(generate_options) = generate_options {
             match (generate_options.max_length, generate_options.max_new_tokens) {
-                (Some(max_length), _) => max_length,
-                (None, Some(max_new_tokens)) => max_new_tokens + input_ids.size().last().unwrap(),
+                (Some(max_length), _) => Some(max_length),
+                (None, Some(max_new_tokens)) => {
+                    Some(max_new_tokens + input_ids.size().last().unwrap())
+                }
                 (None, None) => config.max_length,
             }
         } else {
             config.max_length
         };
+
+        if let Some(max_length) = max_length {
+            if input_ids.size2()?.1 > max_length {
+                return Err(RustBertError::ValueError("The input ids exceeds the maximum length for generation.\
+                 Reduce the size of the provided input ids or increase the allowable maximum generation length.".to_string()));
+            }
+        }
+
+        if max_length.is_none() & eos_token_ids.is_none() {
+            return Err(RustBertError::InvalidConfigurationError("No maximum length given for a model without an EOS token. \
+            This would lead to an infinite generation loop. Please provide a `max_length` or `max_new_tokens`".to_string()));
+        }
 
         let gen_opt = InternalGenerateOptions {
             min_length,
@@ -2044,7 +2193,7 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
                 token_scores,
             });
         }
-        output
+        Ok(output)
     }
 
     /// Returns a reference to the text generator's tokenizer
@@ -2070,7 +2219,7 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
     /// # let weights_path = &home.as_path().join("model.ot");
     /// let device = Device::cuda_if_available();
     /// let generate_config = GenerateConfig {
-    ///     max_length: 30,
+    ///     max_length: Some(30),
     ///     do_sample: true,
     ///     num_beams: 5,
     ///     temperature: 1.1,
@@ -2087,22 +2236,29 @@ pub trait LanguageGenerator<T: LMHeadModel, V: Vocab, U: Tokenizer<V>>:
         self._get_tokenizer()
     }
 
-    fn half(&mut self) {
-        self.get_var_store_mut().half();
+    fn get_tokenizer_mut(&mut self) -> &mut TokenizerOption {
+        self._get_tokenizer_mut()
     }
 
-    fn float(&mut self) {
-        self.get_var_store_mut().float();
+    fn half(&mut self) -> Result<(), RustBertError> {
+        self.get_var_store_mut()?.half();
+        Ok(())
     }
 
-    fn set_device(&mut self, device: Device) {
-        self.get_var_store_mut().set_device(device);
+    fn float(&mut self) -> Result<(), RustBertError> {
+        self.get_var_store_mut()?.float();
+        Ok(())
+    }
+
+    fn set_device(&mut self, device: Device) -> Result<(), RustBertError> {
+        self.get_var_store_mut()?.set_device(device);
+        Ok(())
     }
 }
 
 #[derive(Debug)]
 struct BeamHypotheses {
-    max_length: i64,
+    max_length: Option<i64>,
     length_penalty: f64,
     early_stopping: bool,
     num_beams: i64,
@@ -2138,12 +2294,12 @@ impl Clone for BeamHypotheses {
 impl BeamHypotheses {
     fn new(
         num_beams: i64,
-        max_length: i64,
+        max_length: Option<i64>,
         length_penalty: f64,
         early_stopping: bool,
     ) -> BeamHypotheses {
         BeamHypotheses {
-            max_length: max_length - 1,
+            max_length: max_length.map(|max_length| max_length - 1),
             length_penalty,
             early_stopping,
             num_beams,
@@ -2170,7 +2326,7 @@ impl BeamHypotheses {
                     1,
                     0,
                     Some(Tensor::zeros(
-                        &[1],
+                        [1],
                         (scores_tensor.kind(), scores_tensor.device()),
                     )),
                     None,
@@ -2205,93 +2361,6 @@ impl BeamHypotheses {
                 >= best_sum_log_probabilities / (current_length as f64).powf(self.length_penalty)
         }
     }
-}
-
-/// # Language Model trait
-/// Shared trait between language generation models (e.g. GPT2, GPT, BART) used in language generation pipelines.
-pub trait LMHeadModel {
-    /// Forward pass through the model. Example provided for GPT2.
-    ///
-    /// # Arguments
-    ///
-    /// * `input_ids` - Optional input tensor of shape (*batch size*, *sequence_length*). If None, pre-computed embeddings must be provided (see `input_embeds`)
-    /// * `layer_past` - Optional vector of size *n_layer* containing the past keys and values of each layer of shape (*2*, *batch size*, *number of heads*, *past_sequence_length*, *hidden size per head*). When provided, these are concatenated with the current input keys and values.
-    /// * `attention_mask` - Optional mask of shape (*batch size*, *sequence_length*). Masked position have value 0, non-masked value 1. If None set to 1
-    /// * `input_embeds` - Optional pre-computed input embeddings of shape (*batch size*, *sequence_length*, *hidden_size*). If None, input ids must be provided (see `input_ids`)
-    /// * `token_type_ids` - Optional token type ids used to indicate the portion of the input the token belongs to. If not None, token type embeddings will be added to the token and position embeddings.
-    /// * `position_ids` - Optional position ids of shape (*batch size*, *sequence_length*). If None, will be incremented starting from the length of the past input.
-    /// * `train` - boolean flag to turn on/off the dropout layers in the model. Should be set to false for inference.
-    ///
-    /// # Returns
-    ///
-    /// * `output` - `Tensor` of shape (*batch size*, *sequence_length*, *vocab_size*) representing the logits for each vocab item and position
-    /// * `past` - `Option<Vec<Tensor>>` of length *n_layer* containing the past keys and values of each layer of shape (*2*, *batch size*, *number of heads*, *past_sequence_length*, *hidden size per head*)
-    /// * `hidden_states` - `Option<Vec<Tensor>>` of length *num_hidden_layers* with shape (*batch size*, *sequence_length*, *hidden_size*)
-    /// * `attentions` - `Option<Vec<Tensor>>` of length *num_hidden_layers* with shape (*batch size*, *sequence_length*, *hidden_size*)
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use tch::{nn, Device, Tensor, no_grad};
-    /// # use rust_bert::Config;
-    /// # use std::path::Path;
-    /// # use tch::kind::Kind::{Int64, Double};
-    /// use rust_bert::gpt2::{GPT2LMHeadModel, Gpt2Config};
-    /// use rust_bert::pipelines::generation_utils::{Cache, LMHeadModel};
-    /// # let config_path = Path::new("path/to/config.json");
-    /// # let vocab_path = Path::new("path/to/vocab.txt");
-    /// # let device = Device::Cpu;
-    /// # let vs = nn::VarStore::new(device);
-    /// # let config = Gpt2Config::from_file(config_path);
-    /// # let mut gpt2_model: GPT2LMHeadModel = GPT2LMHeadModel::new(&vs.root(), &config);
-    /// let (batch_size, sequence_length, past_sequence_length) = (64, 128, 56);
-    /// let input_tensor = Tensor::rand(&[batch_size, sequence_length], (Int64, device));
-    /// let mut past: Vec<Tensor> = Vec::with_capacity(config.n_layer as usize);
-    /// for _ in 0..config.n_layer as usize {
-    ///     past.push(Tensor::rand(
-    ///         &[
-    ///             2,
-    ///             batch_size,
-    ///             config.n_head,
-    ///             past_sequence_length,
-    ///             config.n_embd / config.n_head,
-    ///         ],
-    ///         (Double, device),
-    ///     ))
-    /// }
-    /// let attention_mask = Tensor::zeros(&[batch_size, sequence_length], (Int64, device));
-    /// let token_type_ids = Tensor::ones(&[batch_size, sequence_length], (Int64, device));
-    /// let position_ids = Tensor::arange(sequence_length, (Int64, device))
-    ///     .expand(&[batch_size, sequence_length], true);
-    ///
-    /// let model_output = no_grad(|| {
-    ///     gpt2_model
-    ///         .forward_t(
-    ///             Some(&input_tensor),
-    ///             Cache::GPT2Cache(Some(past)),
-    ///             Some(&attention_mask),
-    ///             Some(&token_type_ids),
-    ///             Some(&position_ids),
-    ///             None,
-    ///             None,
-    ///             None,
-    ///             false,
-    ///         )
-    ///         .unwrap()
-    /// });
-    /// ```
-    fn forward_t(
-        &self,
-        input_ids: Option<&Tensor>,
-        layer_past: Cache,
-        attention_mask: Option<&Tensor>,
-        token_type_ids: Option<&Tensor>,
-        position_ids: Option<&Tensor>,
-        input_embeds: Option<&Tensor>,
-        encoder_outputs: Option<&Tensor>,
-        decoder_input_ids: Option<&Tensor>,
-        train: bool,
-    ) -> Result<LMModelOutput, RustBertError>;
 }
 
 /// Container holding a language model output for generation tasks

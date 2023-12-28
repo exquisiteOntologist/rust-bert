@@ -14,7 +14,7 @@
 
 extern crate anyhow;
 
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::text_generation::{TextGenerationConfig, TextGenerationModel};
 use rust_bert::reformer::{
     ReformerConfigResources, ReformerModelResources, ReformerVocabResources,
@@ -30,20 +30,17 @@ fn main() -> anyhow::Result<()> {
     let vocab_resource = Box::new(RemoteResource::from_pretrained(
         ReformerVocabResources::CRIME_AND_PUNISHMENT,
     ));
-    let merges_resource = Box::new(RemoteResource::from_pretrained(
-        ReformerVocabResources::CRIME_AND_PUNISHMENT,
-    ));
     let model_resource = Box::new(RemoteResource::from_pretrained(
         ReformerModelResources::CRIME_AND_PUNISHMENT,
     ));
     let generate_config = TextGenerationConfig {
         model_type: ModelType::Reformer,
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
         vocab_resource,
-        merges_resource,
+        merges_resource: None,
         min_length: 100,
-        max_length: 100,
+        max_length: Some(100),
         do_sample: true,
         early_stopping: false,
         num_beams: 3,
@@ -55,10 +52,10 @@ fn main() -> anyhow::Result<()> {
 
     let input_context_1 = "The really great men must, I think,";
     let input_context_2 = "It was a gloom winter night, and";
-    let output = model.generate(&[input_context_1, input_context_2], None);
+    let output = model.generate(&[input_context_1, input_context_2], None)?;
 
     for sentence in output {
-        println!("{}", sentence);
+        println!("{sentence}");
     }
     Ok(())
 }

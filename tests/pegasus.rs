@@ -1,7 +1,7 @@
 use rust_bert::pipelines::summarization::{SummarizationConfig, SummarizationModel};
 
 use rust_bert::pegasus::{PegasusConfigResources, PegasusModelResources, PegasusVocabResources};
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::resources::RemoteResource;
 use tch::Device;
 
@@ -20,10 +20,10 @@ fn pegasus_summarization_greedy() -> anyhow::Result<()> {
 
     let summarization_config = SummarizationConfig {
         model_type: ModelType::Pegasus,
-        model_resource,
+        model_resource: ModelResource::Torch(model_resource),
         config_resource,
-        vocab_resource: vocab_resource.clone(),
-        merges_resource: vocab_resource,
+        vocab_resource,
+        merges_resource: None,
         num_beams: 4,
         no_repeat_ngram_size: 3,
         device: Device::cuda_if_available(),
@@ -54,7 +54,7 @@ telescope — scheduled for launch in 2021 — and the European Space Agency's 2
 about exoplanets like K2-18b."];
 
     //    Credits: WikiNews, CC BY 2.5 license (https://en.wikinews.org/wiki/Astronomers_find_water_vapour_in_atmosphere_of_exoplanet_K2-18b)
-    let output = summarization_model.summarize(&input);
+    let output = summarization_model.summarize(&input)?;
 
     assert_eq!(output.len(), 1);
     assert_eq!(

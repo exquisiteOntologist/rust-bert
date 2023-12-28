@@ -6,7 +6,7 @@ use rust_bert::albert::{
     AlbertForQuestionAnswering, AlbertForSequenceClassification, AlbertForTokenClassification,
     AlbertModelResources, AlbertVocabResources,
 };
-use rust_bert::resources::{RemoteResource, ResourceProvider};
+use rust_bert::resources::{load_weights, RemoteResource, ResourceProvider};
 use rust_bert::Config;
 use rust_tokenizers::tokenizer::{AlbertTokenizer, MultiThreadedTokenizer, TruncationStrategy};
 use rust_tokenizers::vocab::Vocab;
@@ -27,7 +27,6 @@ fn albert_masked_lm() -> anyhow::Result<()> {
     ));
     let config_path = config_resource.get_local_path()?;
     let vocab_path = vocab_resource.get_local_path()?;
-    let weights_path = weights_resource.get_local_path()?;
 
     //    Set-up masked LM model
     let device = Device::Cpu;
@@ -35,8 +34,8 @@ fn albert_masked_lm() -> anyhow::Result<()> {
     let tokenizer: AlbertTokenizer =
         AlbertTokenizer::from_file(vocab_path.to_str().unwrap(), true, false)?;
     let config = AlbertConfig::from_file(config_path);
-    let albert_model = AlbertForMaskedLM::new(&vs.root(), &config);
-    vs.load(weights_path)?;
+    let albert_model = AlbertForMaskedLM::new(vs.root(), &config);
+    load_weights(&weights_resource, &mut vs, None, device)?;
 
     //    Define input
     let input = [
@@ -56,7 +55,7 @@ fn albert_masked_lm() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -109,7 +108,7 @@ fn albert_for_sequence_classification() -> anyhow::Result<()> {
     config.id2label = Some(dummy_label_mapping);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let albert_model = AlbertForSequenceClassification::new(&vs.root(), &config);
+    let albert_model = AlbertForSequenceClassification::new(vs.root(), &config)?;
 
     //    Define input
     let input = [
@@ -129,7 +128,7 @@ fn albert_for_sequence_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -170,7 +169,7 @@ fn albert_for_multiple_choice() -> anyhow::Result<()> {
     let mut config = AlbertConfig::from_file(config_path);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let albert_model = AlbertForMultipleChoice::new(&vs.root(), &config);
+    let albert_model = AlbertForMultipleChoice::new(vs.root(), &config);
 
     //    Define input
     let input = [
@@ -190,7 +189,7 @@ fn albert_for_multiple_choice() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0)
         .to(device)
@@ -242,7 +241,7 @@ fn albert_for_token_classification() -> anyhow::Result<()> {
     config.id2label = Some(dummy_label_mapping);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let albert_model = AlbertForTokenClassification::new(&vs.root(), &config);
+    let albert_model = AlbertForTokenClassification::new(vs.root(), &config)?;
 
     //    Define input
     let input = [
@@ -262,7 +261,7 @@ fn albert_for_token_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -303,7 +302,7 @@ fn albert_for_question_answering() -> anyhow::Result<()> {
     let mut config = AlbertConfig::from_file(config_path);
     config.output_attentions = Some(true);
     config.output_hidden_states = Some(true);
-    let albert_model = AlbertForQuestionAnswering::new(&vs.root(), &config);
+    let albert_model = AlbertForQuestionAnswering::new(vs.root(), &config);
 
     //    Define input
     let input = [
@@ -323,7 +322,7 @@ fn albert_for_question_answering() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 

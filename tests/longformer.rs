@@ -7,15 +7,16 @@ use rust_bert::longformer::{
     LongformerForTokenClassification, LongformerMergesResources, LongformerModelResources,
     LongformerVocabResources,
 };
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::question_answering::{
     QaInput, QuestionAnsweringConfig, QuestionAnsweringModel,
 };
 use rust_bert::resources::{RemoteResource, ResourceProvider};
 use rust_bert::Config;
 use rust_tokenizers::tokenizer::{MultiThreadedTokenizer, RobertaTokenizer, TruncationStrategy};
-use rust_tokenizers::vocab::{RobertaVocab, Vocab};
+use rust_tokenizers::vocab::Vocab;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use tch::{nn, no_grad, Device, Tensor};
 
 #[test]
@@ -67,17 +68,19 @@ fn longformer_masked_lm() -> anyhow::Result<()> {
         .map(|input| input.token_ids.clone())
         .map(|mut input| {
             input.extend(vec![
-                tokenizer.vocab().token_to_id(RobertaVocab::pad_value());
+                tokenizer
+                    .vocab()
+                    .token_to_id(tokenizer.vocab().get_pad_value());
                 max_len - input.len()
             ]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
     let mut global_attention_mask_vector = vec![0; max_len];
     global_attention_mask_vector[0] = 1;
-    let global_attention_mask = Tensor::of_slice(global_attention_mask_vector.as_slice());
+    let global_attention_mask = Tensor::from_slice(global_attention_mask_vector.as_slice());
     let global_attention_mask = Tensor::stack(
         vec![&global_attention_mask; tokenized_input.len()].as_slice(),
         0,
@@ -114,12 +117,12 @@ fn longformer_masked_lm() -> anyhow::Result<()> {
         .prediction_scores
         .get(0)
         .get(4)
-        .double_value(&[i64::from(&index_1)]);
+        .double_value(&[i64::try_from(&index_1)?]);
     let score_2 = model_output
         .prediction_scores
         .get(1)
         .get(7)
-        .double_value(&[i64::from(&index_2)]);
+        .double_value(&[i64::try_from(&index_2)?]);
 
     assert_eq!("Ġeye", word_1); // Outputs "person" : "Looks like one [eye] is missing"
     assert_eq!("Ġsunny", word_2); // Outputs "pear" : "It was a nice and [sunny] day"
@@ -197,7 +200,7 @@ fn longformer_for_sequence_classification() -> anyhow::Result<()> {
     dummy_label_mapping.insert(1, String::from("Negative"));
     dummy_label_mapping.insert(3, String::from("Neutral"));
     config.id2label = Some(dummy_label_mapping);
-    let model = LongformerForSequenceClassification::new(&vs.root(), &config);
+    let model = LongformerForSequenceClassification::new(vs.root(), &config)?;
 
     //    Define input
     let input = ["Very positive sentence", "Second sentence input"];
@@ -214,7 +217,7 @@ fn longformer_for_sequence_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -258,7 +261,7 @@ fn longformer_for_multiple_choice() -> anyhow::Result<()> {
         false,
     )?;
     let config = LongformerConfig::from_file(config_path);
-    let model = LongformerForMultipleChoice::new(&vs.root(), &config);
+    let model = LongformerForMultipleChoice::new(vs.root(), &config);
 
     //    Define input
     let prompt = "In Italy, pizza served in formal settings, such as at a restaurant, is presented unsliced.";
@@ -284,7 +287,7 @@ fn longformer_for_multiple_choice() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0)
         .to(device)
@@ -337,7 +340,7 @@ fn longformer_for_token_classification() -> anyhow::Result<()> {
     dummy_label_mapping.insert(2, String::from("PER"));
     dummy_label_mapping.insert(3, String::from("ORG"));
     config.id2label = Some(dummy_label_mapping);
-    let model = LongformerForTokenClassification::new(&vs.root(), &config);
+    let model = LongformerForTokenClassification::new(vs.root(), &config)?;
 
     //    Define input
     let inputs = ["Where's Paris?", "In Kentucky, United States"];
@@ -354,7 +357,7 @@ fn longformer_for_token_classification() -> anyhow::Result<()> {
             input.extend(vec![0; max_len - input.len()]);
             input
         })
-        .map(|input| Tensor::of_slice(&(input)))
+        .map(|input| Tensor::from_slice(&(input)))
         .collect::<Vec<_>>();
     let input_tensor = Tensor::stack(tokenized_input.as_slice(), 0).to(device);
 
@@ -381,7 +384,9 @@ fn longformer_for_question_answering() -> anyhow::Result<()> {
     //    Set-up Question Answering model
     let config = QuestionAnsweringConfig::new(
         ModelType::Longformer,
-        RemoteResource::from_pretrained(LongformerModelResources::LONGFORMER_BASE_SQUAD1),
+        ModelResource::Torch(Box::new(RemoteResource::from_pretrained(
+            LongformerModelResources::LONGFORMER_BASE_SQUAD1,
+        ))),
         RemoteResource::from_pretrained(LongformerConfigResources::LONGFORMER_BASE_SQUAD1),
         RemoteResource::from_pretrained(LongformerVocabResources::LONGFORMER_BASE_SQUAD1),
         Some(RemoteResource::from_pretrained(

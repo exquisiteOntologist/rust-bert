@@ -16,7 +16,7 @@ use rust_bert::mbart::{
     MBartConfigResources, MBartModelResources, MBartSourceLanguages, MBartTargetLanguages,
     MBartVocabResources,
 };
-use rust_bert::pipelines::common::ModelType;
+use rust_bert::pipelines::common::{ModelResource, ModelType};
 use rust_bert::pipelines::translation::{Language, TranslationConfig, TranslationModel};
 use rust_bert::resources::RemoteResource;
 use tch::Device;
@@ -26,18 +26,16 @@ fn main() -> anyhow::Result<()> {
     let config_resource =
         RemoteResource::from_pretrained(MBartConfigResources::MBART50_MANY_TO_MANY);
     let vocab_resource = RemoteResource::from_pretrained(MBartVocabResources::MBART50_MANY_TO_MANY);
-    let merges_resource =
-        RemoteResource::from_pretrained(MBartVocabResources::MBART50_MANY_TO_MANY);
 
     let source_languages = MBartSourceLanguages::MBART50_MANY_TO_MANY;
     let target_languages = MBartTargetLanguages::MBART50_MANY_TO_MANY;
 
     let translation_config = TranslationConfig::new(
         ModelType::MBart,
-        model_resource,
+        ModelResource::Torch(Box::new(model_resource)),
         config_resource,
         vocab_resource,
-        merges_resource,
+        None,
         source_languages,
         target_languages,
         Device::cuda_if_available(),
@@ -52,7 +50,7 @@ fn main() -> anyhow::Result<()> {
     outputs.extend(model.translate(&[source_sentence], Language::English, Language::Hindi)?);
 
     for sentence in outputs {
-        println!("{}", sentence);
+        println!("{sentence}");
     }
     Ok(())
 }
